@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main, work]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: articket
+          POSTGRES_USER: articket
+          POSTGRES_PASSWORD: articket
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U articket -d articket"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup node (pinned)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.11.1'
+
+      - name: setup Docker
+        uses: docker/setup-buildx-action@v3
+
+      - name: build
+        run: docker compose build
+
+      - name: run tests
+        run: ./scripts/test.sh
+
+      - name: run verify scripts
+        run: bash -n scripts/verify.sh loadtests/verify-no-oversell.sh loadtests/verify-consistency.sh
+
+      - name: report status
+        if: always()
+        run: echo "CI finished with status ${{ job.status }}"
