@@ -13,7 +13,13 @@ if [[ -z "$EVENT_ID" ]]; then
 fi
 
 if [[ -z "$EVENT_ID" ]]; then
-  echo "[verify] No se encontró EVENT_ID para verificar consistencia" >&2
+  echo "[verify] No se encontró EVENT_ID. Ejecutando seed para poblar datos mínimos..."
+  docker compose run --rm seed >/dev/null
+  EVENT_ID="$(docker compose exec -T postgres psql -U "${POSTGRES_USER:-articket}" -d "${POSTGRES_DB:-articket}" -t -A -c 'SELECT id::text FROM "Event" ORDER BY "createdAt" DESC LIMIT 1;' | tr -d '\r')"
+fi
+
+if [[ -z "$EVENT_ID" ]]; then
+  echo "[verify] No se pudo obtener EVENT_ID ni luego de seed" >&2
   exit 1
 fi
 
