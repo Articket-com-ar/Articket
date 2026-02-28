@@ -23,6 +23,7 @@ import {
 } from "./observability/metrics.js";
 import { ensureNotReplay } from "./modules/payments/webhook-idempotency.js";
 import { assertWebhookRateLimitShared } from "./modules/payments/webhook-rate-limit.js";
+import { fetchLatePaymentOutboxSummary } from "./modules/payments/latePaymentOutboxSummary.js";
 import { ACTIVITY_EVENT_TYPES, type ActivityEventType, fetchEventActivity } from "./modules/activity/service.js";
 
 const app = Fastify({ logger: true });
@@ -663,7 +664,7 @@ app.get("/late-payment-cases", { preHandler: verifyAuth }, async (req: any) => {
 
   await requireMembership(user.userId, query.organizerId, ["owner", "admin", "staff"]);
 
-  return prisma.latePaymentCase.findMany({
+  const cases = await prisma.latePaymentCase.findMany({
     where: {
       status: query.status,
       ...(query.provider ? { provider: query.provider.toLowerCase() } : {}),
@@ -681,6 +682,13 @@ app.get("/late-payment-cases", { preHandler: verifyAuth }, async (req: any) => {
     orderBy: { detectedAt: "desc" },
     take: query.limit
   });
+
+  const outboxByCase = await fetchLatePaymentOutboxSummary(prisma, cases.map((item) => item.id));
+
+  return cases.map((item) => ({
+    ...item,
+    outbox: outboxByCase[item.id] ?? { pendingEvents: 0, lastRetryCount: 0, lastError: null }
+  }));
 });
 
 app.post("/late-payment-cases/:id/resolve", { preHandler: verifyAuth }, async (req: any) => {
