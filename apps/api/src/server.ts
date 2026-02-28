@@ -14,6 +14,7 @@ import { generateTicketCode, verifyTicketCode } from "./lib/qr.js";
 import { notificationQueue } from "./modules/notifications/queue.js";
 import { emitDomainEvent } from "./lib/domainEvents.js";
 import { DomainEventName } from "./domain/events.js";
+import { emitDomainEventTx } from "./domain/outbox.js";
 import {
   latePaymentCasesPending,
   latePaymentCasesTotal,
@@ -777,6 +778,22 @@ app.post("/late-payment-cases/:id/resolve", { preHandler: verifyAuth }, async (r
       }
     }, tx);
 
+    await emitDomainEventTx(tx, {
+      eventName: DomainEventName.LATE_PAYMENT_CASE_RESOLVED,
+      aggregateType: "LatePaymentCase",
+      aggregateId: lateCase.id,
+      correlationId: req.correlationId,
+      payload: {
+        caseId: lateCase.id,
+        orderId: lateCase.order.id,
+        action: body.action,
+        previousStatus: lateCase.status,
+        status: nextStatus,
+        actorId: user.userId,
+        resolvedAt: resolvedAt.toISOString()
+      }
+    });
+
     return resolved;
   });
 
@@ -1007,6 +1024,20 @@ app.post("/webhooks/payments/:provider", async (req: any) => {
           paymentAttemptId: paymentAttemptId ?? null
         }
       }, tx);
+
+      await emitDomainEventTx(tx, {
+        eventName: DomainEventName.LATE_PAYMENT_CASE_CREATED,
+        aggregateType: "LatePaymentCase",
+        aggregateId: lateCase.id,
+        correlationId: req.correlationId,
+        payload: {
+          orderId: order.id,
+          provider,
+          externalEventId,
+          providerPaymentId: providerPaymentId ?? null,
+          paymentAttemptId: paymentAttemptId ?? null
+        }
+      });
     });
 
     latePaymentCasesTotal.inc({ provider, reason: "inventory_released_after_expire" });

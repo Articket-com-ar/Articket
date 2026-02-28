@@ -65,5 +65,7 @@ Mapea ADR -> módulos de código -> endpoints -> eventos de dominio -> métricas
   - `apps/web/src/features/checkin/*`
 
 ## Notes
+- `DomainEvent` = historial/auditoría append-only de dominio.
+- `DomainEventOutbox` = cola transaccional de entrega/publicación de eventos.
 - Este mapeo es contractual y debe actualizarse junto con cada ADR.
 - Si cambia un endpoint/evento/métrica, actualizar ADR + matriz en el mismo PR.
