@@ -1,5 +1,6 @@
 import { emitDomainEvent } from "../lib/domainEvents.js";
 import { prisma } from "../lib/prisma.js";
+import { DomainEventName } from "../domain/events.js";
 
 async function run() {
   const now = new Date();
@@ -15,7 +16,7 @@ async function run() {
 
     for (const order of expiredOrders) {
       await emitDomainEvent({
-        type: "ORDER_EXPIRED",
+        type: DomainEventName.ORDER_EXPIRED,
         correlationId: `job:releaseExpiredReservations:${now.toISOString()}`,
         actorType: "system",
         aggregateType: "order",

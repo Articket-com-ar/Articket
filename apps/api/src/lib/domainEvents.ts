@@ -1,19 +1,10 @@
 import { Prisma, PrismaClient, type DomainActorType, type DomainAggregateType } from "@prisma/client";
 import { Counter, register } from "prom-client";
+import { DomainEventName } from "../domain/events.js";
 
 export const DOMAIN_EVENT_VERSION = 1;
 
-export const DOMAIN_EVENT_TYPES = [
-  "ORDER_RESERVED",
-  "ORDER_PAID",
-  "TICKETS_ISSUED",
-  "TICKET_CHECKED_IN",
-  "ORDER_CONFIRMATION_EMAIL_SENT",
-  "ORDER_EXPIRED",
-  "INVENTORY_RESERVATION_RELEASED"
-] as const;
-
-type DomainEventType = (typeof DOMAIN_EVENT_TYPES)[number];
+type DomainEventType = DomainEventName;
 
 type DomainEventInput = {
   type: DomainEventType;

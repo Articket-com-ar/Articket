@@ -8,10 +8,10 @@ describe("domain event contract in critical flows", () => {
 
   it("checkout/checkin flows emit required events", () => {
     const server = read("apps/api/src/server.ts");
-    expect(server).toContain('type: "ORDER_RESERVED"');
-    expect(server).toContain('type: "ORDER_PAID"');
-    expect(server).toContain('type: "TICKETS_ISSUED"');
-    expect(server).toContain('type: "TICKET_CHECKED_IN"');
+    expect(server).toContain("DomainEventName.ORDER_RESERVED");
+    expect(server).toContain("DomainEventName.ORDER_PAID");
+    expect(server).toContain("DomainEventName.TICKETS_ISSUED");
+    expect(server).toContain("DomainEventName.TICKET_CHECKED_IN");
   });
 
   it("email and expiration flows emit required events in transactions", () => {
@@ -19,9 +19,9 @@ describe("domain event contract in critical flows", () => {
     const releaseJob = read("apps/api/src/jobs/releaseExpiredReservations.ts");
 
     expect(worker).toContain("prisma.$transaction");
-    expect(worker).toContain('type: "ORDER_CONFIRMATION_EMAIL_SENT"');
+    expect(worker).toContain("DomainEventName.ORDER_CONFIRMATION_EMAIL_SENT");
 
     expect(releaseJob).toContain("prisma.$transaction");
-    expect(releaseJob).toContain('type: "ORDER_EXPIRED"');
+    expect(releaseJob).toContain("DomainEventName.ORDER_EXPIRED");
   });
 });

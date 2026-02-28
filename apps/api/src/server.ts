@@ -1,4 +1,4 @@
-import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
+﻿import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
 import jwt from "@fastify/jwt";
 import sensible from "@fastify/sensible";
@@ -12,6 +12,9 @@ import { env } from "./lib/env.js";
 import { generateTicketCode, verifyTicketCode } from "./lib/qr.js";
 import { notificationQueue } from "./modules/notifications/queue.js";
 import { emitDomainEvent } from "./lib/domainEvents.js";
+import { DomainEventName } from "./domain/events.js";
+import { latePaymentCasesTotal, manualOverrideEntriesTotal } from "./observability/metrics.js";
+import { ensureNotReplay } from "./modules/payments/webhook-idempotency.js";
 import { ACTIVITY_EVENT_TYPES, type ActivityEventType, fetchEventActivity } from "./modules/activity/service.js";
 
 const app = Fastify({ logger: true });
@@ -26,7 +29,7 @@ const httpRequestsTotal = new Counter({
 
 const httpRequestDuration = new Histogram({
   name: "http_request_duration_seconds",
-  help: "Duración de requests HTTP en segundos",
+  help: "DuraciÃ³n de requests HTTP en segundos",
   labelNames: ["method", "route"],
   buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.3, 0.5, 1, 2, 5]
 });
@@ -50,7 +53,7 @@ const checkoutConfirmTotal = new Counter({
 
 const ticketValidateTotal = new Counter({
   name: "ticket_validate_total",
-  help: "Total de validaciones de ticket por código",
+  help: "Total de validaciones de ticket por cÃ³digo",
   labelNames: ["status"]
 });
 
@@ -120,7 +123,7 @@ async function requireMembership(userId: string, organizerId: string, roles: Rol
 }
 
 async function validateTicketRecord(db: TicketDbLike, code: string): Promise<TicketValidation> {
-  if (!verifyTicketCode(code)) return { valid: false, reason: "Firma inválida" };
+  if (!verifyTicketCode(code)) return { valid: false, reason: "Firma invÃ¡lida" };
   const ticket = await db.ticket.findUnique({
     where: { code },
     select: { id: true, eventId: true, status: true, checkedInAt: true }
@@ -156,7 +159,7 @@ app.post("/auth/login", async (req) => {
   const body = z.object({ email: z.string().email(), password: z.string().min(8) }).parse(req.body);
   const user = await prisma.user.findUnique({ where: { email: body.email } });
   if (!user || !(await bcrypt.compare(body.password, user.passwordHash))) {
-    throw app.httpErrors.unauthorized("Credenciales inválidas");
+    throw app.httpErrors.unauthorized("Credenciales invÃ¡lidas");
   }
   const accessToken = app.jwt.sign({ userId: user.id, email: user.email } as JwtPayload, { expiresIn: "15m" });
   const refreshToken = app.jwt.sign({ userId: user.id, email: user.email } as JwtPayload, {
@@ -257,8 +260,8 @@ app.post("/checkout/reserve", async (req: any) => {
     for (const item of body.items) {
       await tx.$queryRaw`SELECT id FROM "TicketType" WHERE id = ${item.ticketTypeId} FOR UPDATE`;
       const tt = await tx.ticketType.findUniqueOrThrow({ where: { id: item.ticketTypeId } });
-      if (tt.eventId !== body.eventId) throw new Error("Ticket type inválido");
-      if (item.quantity > tt.maxPerOrder) throw new Error("Supera máximo por orden");
+      if (tt.eventId !== body.eventId) throw new Error("Ticket type invÃ¡lido");
+      if (item.quantity > tt.maxPerOrder) throw new Error("Supera mÃ¡ximo por orden");
 
       const paid = await tx.orderItem.aggregate({
         _sum: { quantity: true },
@@ -311,7 +314,7 @@ app.post("/checkout/reserve", async (req: any) => {
     });
 
     await emitDomainEvent({
-      type: "ORDER_RESERVED",
+      type: DomainEventName.ORDER_RESERVED,
       correlationId: correlationId,
       actorType: "system",
       aggregateType: "order",
@@ -357,12 +360,12 @@ app.post("/checkout/confirm", async (req: any) => {
     }
 
     const order = await tx.order.findUnique({ where: { id: body.orderId }, include: { items: true } });
-    if (!order) throw new Error("Orden inválida");
+    if (!order) throw new Error("Orden invÃ¡lida");
 
     if (order.status === "paid") {
       return tx.order.findUnique({ where: { id: order.id }, include: { tickets: true } });
     }
-    if (order.status !== "reserved") throw new Error("Estado de orden inválido");
+    if (order.status !== "reserved") throw new Error("Estado de orden invÃ¡lido");
     if (!order.reservedUntil || order.reservedUntil < new Date()) throw new Error("Reserva expirada");
 
     await tx.payment.create({
@@ -378,7 +381,7 @@ app.post("/checkout/confirm", async (req: any) => {
     await tx.order.update({ where: { id: order.id }, data: { status: "paid" } });
 
     await emitDomainEvent({
-      type: "ORDER_PAID",
+      type: DomainEventName.ORDER_PAID,
       correlationId: correlationId,
       actorType: "system",
       aggregateType: "order",
@@ -407,7 +410,7 @@ app.post("/checkout/confirm", async (req: any) => {
       if (rows.length > 0) {
         await tx.ticket.createMany({ data: rows });
         await emitDomainEvent({
-          type: "TICKETS_ISSUED",
+          type: DomainEventName.TICKETS_ISSUED,
           correlationId: correlationId,
           actorType: "system",
           aggregateType: "order",
@@ -473,7 +476,7 @@ app.get("/events/:eventId/activity", { preHandler: verifyAuth }, async (req: any
   if (types?.length) {
     const invalid = types.filter((type) => !ACTIVITY_EVENT_TYPES.includes(type as any));
     if (invalid.length > 0) {
-      throw app.httpErrors.badRequest(`Tipos de actividad inválidos: ${invalid.join(", ")}`);
+      throw app.httpErrors.badRequest(`Tipos de actividad invÃ¡lidos: ${invalid.join(", ")}`);
     }
   }
 
@@ -497,7 +500,7 @@ app.post("/checkin/scan", { preHandler: verifyAuth }, async (req: any) => {
   return prisma.$transaction(async (tx) => {
     if (!verifyTicketCode(body.code)) {
       checkinScanTotal.inc({ status: "invalid" });
-      return { ok: false, reason: "Firma inválida" };
+      return { ok: false, reason: "Firma invÃ¡lida" };
     }
 
     const lockRows = await tx.$queryRaw<Array<{ id: string }>>`
@@ -550,11 +553,29 @@ app.post("/checkin/scan", { preHandler: verifyAuth }, async (req: any) => {
       return { ok: false, reason: "Doble check-in bloqueado" };
     }
 
+    if (current.status === "checked_in" && body.allowOverride) {
+      manualOverrideEntriesTotal.inc({ reason: "already_checked_in_override" });
+      await emitDomainEvent({
+        type: DomainEventName.MANUAL_OVERRIDE_EXECUTED,
+        correlationId: correlationId,
+        actorType: "user",
+        actorId: user.userId,
+        aggregateType: "ticket",
+        aggregateId: ticket.id,
+        organizerId: event.organizerId,
+        eventId: ticket.eventId,
+        orderId: null,
+        ticketId: ticket.id,
+        context: { source: "checkin.scan", gate: body.gate ?? null, reason: "already_checked_in_override" },
+        payload: { scannedByUserId: user.userId }
+      }, tx);
+    }
+
     await tx.ticket.update({ where: { id: ticket.id }, data: { status: "checked_in", checkedInAt: new Date(), checkedInBy: user.userId } });
     await tx.ticketScan.create({ data: { ticketId: ticket.id, eventId: ticket.eventId, scannedById: user.userId, result: "valid", gate: body.gate } });
 
     await emitDomainEvent({
-      type: "TICKET_CHECKED_IN",
+      type: DomainEventName.TICKET_CHECKED_IN,
       correlationId: correlationId,
       actorType: "user",
       actorId: user.userId,
@@ -587,6 +608,172 @@ app.post("/orders/:id/resend-confirmation", { preHandler: verifyAuth }, async (r
   );
 
   return { ok: true };
+});
+
+app.post("/webhooks/payments/:provider", async (req: any) => {
+  const params = z.object({ provider: z.string().min(1) }).parse(req.params);
+  const body = z
+    .object({
+      externalEventId: z.string().optional(),
+      eventId: z.string().optional(),
+      id: z.union([z.string(), z.number()]).optional(),
+      orderId: z.string().uuid().optional(),
+      paymentAttemptId: z.string().uuid().optional(),
+      providerPaymentId: z.string().optional(),
+      paymentReference: z.string().optional(),
+      status: z.string().optional(),
+      reserveId: z.string().uuid().optional()
+    })
+    .passthrough()
+    .parse(req.body ?? {});
+
+  const provider = params.provider.toLowerCase();
+  const externalEventId = body.externalEventId ?? body.eventId ?? (body.id ? String(body.id) : undefined);
+
+  if (!externalEventId) {
+    throw app.httpErrors.badRequest("externalEventId requerido");
+  }
+
+  const freshEvent = await ensureNotReplay(provider, externalEventId);
+  if (!freshEvent) {
+    return { ok: true, replay: true };
+  }
+
+  const providerPaymentId = body.providerPaymentId ?? body.paymentReference ?? undefined;
+  const paymentStatus = body.status?.toLowerCase() ?? "unknown";
+  const paidSignal = ["paid", "approved", "captured", "succeeded", "confirmed"].includes(paymentStatus);
+
+  let orderId = body.orderId;
+  let paymentAttemptId = body.paymentAttemptId;
+
+  if (!orderId && providerPaymentId) {
+    const payment = await prisma.payment.findUnique({
+      where: { provider_providerRef: { provider, providerRef: providerPaymentId } },
+      select: { id: true, orderId: true }
+    });
+    if (payment) {
+      orderId = payment.orderId;
+      paymentAttemptId = payment.id;
+    }
+  }
+
+  if (!orderId) {
+    return { ok: true, recorded: true, matched: false };
+  }
+
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: {
+      reservations: {
+        select: { id: true, expiresAt: true, releasedAt: true },
+        orderBy: { createdAt: "desc" },
+        take: 1
+      }
+    }
+  });
+
+  if (!order) {
+    return { ok: true, recorded: true, matched: false };
+  }
+
+  const now = new Date();
+  const reservation = order.reservations.at(0) ?? null;
+  const reservationExpired = order.status === "expired" || (!!order.reservedUntil && order.reservedUntil < now);
+  const inventoryReleased = !!reservation?.releasedAt;
+
+  if (paidSignal && reservationExpired && inventoryReleased) {
+    const detectedAt = new Date();
+    const reserveId = body.reserveId ?? reservation?.id ?? null;
+
+    const lateCaseBase = {
+      orderId: order.id,
+      reserveId,
+      provider,
+      providerPaymentId: providerPaymentId ?? null,
+      paymentAttemptId: paymentAttemptId ?? null,
+      inventoryReleased: true,
+      status: "PENDING" as const,
+      detectedAt
+    };
+
+    let lateCase;
+    if (providerPaymentId) {
+      lateCase = await prisma.latePaymentCase.upsert({
+        where: { provider_providerPaymentId: { provider, providerPaymentId } },
+        update: {
+          inventoryReleased: true,
+          status: "PENDING",
+          detectedAt
+        },
+        create: lateCaseBase
+      });
+    } else if (paymentAttemptId) {
+      lateCase = await prisma.latePaymentCase.upsert({
+        where: { orderId_paymentAttemptId: { orderId: order.id, paymentAttemptId } },
+        update: {
+          inventoryReleased: true,
+          status: "PENDING",
+          detectedAt
+        },
+        create: lateCaseBase
+      });
+    } else {
+      lateCase = await prisma.latePaymentCase.create({ data: lateCaseBase });
+    }
+
+    await prisma.order.update({
+      where: { id: order.id },
+      data: { latePaymentReviewRequired: true }
+    });
+
+    await prisma.$transaction(async (tx) => {
+      await emitDomainEvent({
+        type: DomainEventName.LATE_PAYMENT_DETECTED,
+        correlationId: req.correlationId,
+        actorType: "webhook",
+        aggregateType: "order",
+        aggregateId: order.id,
+        organizerId: order.organizerId,
+        eventId: order.eventId,
+        orderId: order.id,
+        context: { source: "webhooks.payments", provider, externalEventId },
+        payload: {
+          providerPaymentId: providerPaymentId ?? null,
+          paymentAttemptId: paymentAttemptId ?? null,
+          inventoryReleased,
+          reservationExpired
+        }
+      }, tx);
+
+      await emitDomainEvent({
+        type: DomainEventName.LATE_PAYMENT_CASE_CREATED,
+        correlationId: req.correlationId,
+        actorType: "webhook",
+        aggregateType: "order",
+        aggregateId: order.id,
+        organizerId: order.organizerId,
+        eventId: order.eventId,
+        orderId: order.id,
+        context: { source: "webhooks.payments", provider, externalEventId },
+        payload: {
+          latePaymentCaseId: lateCase.id,
+          providerPaymentId: providerPaymentId ?? null,
+          paymentAttemptId: paymentAttemptId ?? null
+        }
+      }, tx);
+    });
+
+    latePaymentCasesTotal.inc({ provider, reason: "inventory_released_after_expire" });
+
+    return {
+      ok: true,
+      recorded: true,
+      latePaymentCaseId: lateCase.id,
+      latePaymentReviewRequired: true
+    };
+  }
+
+  return { ok: true, recorded: true, matched: true };
 });
 
 app.post("/webhooks/sendgrid", async (req: any) => {
@@ -627,3 +814,4 @@ app.setErrorHandler((error: Error & { statusCode?: number; code?: string }, req:
 });
 
 await app.listen({ host: "0.0.0.0", port: env.apiPort });
+
