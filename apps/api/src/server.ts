@@ -729,17 +729,24 @@ app.post("/late-payment-cases/:id/resolve", { preHandler: verifyAuth }, async (r
       where: {
         id: lateCase.id,
         status: lateCase.status,
-        updatedAt: lateCase.updatedAt
+        version: lateCase.version
       },
       data: {
         status: nextStatus,
         resolutionNotes: body.resolutionNotes ?? null,
         resolvedAt,
-        resolvedBy: user.userId
+        resolvedBy: user.userId,
+        version: { increment: 1 }
       }
     });
 
     if (updateResult.count === 0) {
+      req.log.warn({
+        correlationId: req.correlationId,
+        caseId: lateCase.id,
+        attemptedVersion: lateCase.version,
+        actorId: user.userId
+      }, "late payment resolve conflict");
       throw app.httpErrors.conflict("LatePaymentCase actualizado por otro operador");
     }
 
