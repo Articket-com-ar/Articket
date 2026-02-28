@@ -39,3 +39,15 @@ export const manualOverrideEntriesTotal = getOrCreateCounter(
   "Total de entradas manuales (manual override) en check-in",
   ["reason"]
 );
+
+export const webhookReplaysTotal = getOrCreateCounter(
+  "webhook_replays_total",
+  "Total de webhooks detectados como replay",
+  ["provider"]
+);
+
+export const webhookSignatureInvalidTotal = getOrCreateCounter(
+  "webhook_signature_invalid_total",
+  "Total de webhooks rechazados por firma inválida",
+  ["provider"]
+);

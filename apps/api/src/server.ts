@@ -1,4 +1,5 @@
 ﻿import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import cors from "@fastify/cors";
 import jwt from "@fastify/jwt";
 import sensible from "@fastify/sensible";
@@ -13,7 +14,13 @@ import { generateTicketCode, verifyTicketCode } from "./lib/qr.js";
 import { notificationQueue } from "./modules/notifications/queue.js";
 import { emitDomainEvent } from "./lib/domainEvents.js";
 import { DomainEventName } from "./domain/events.js";
-import { latePaymentCasesPending, latePaymentCasesTotal, manualOverrideEntriesTotal } from "./observability/metrics.js";
+import {
+  latePaymentCasesPending,
+  latePaymentCasesTotal,
+  manualOverrideEntriesTotal,
+  webhookReplaysTotal,
+  webhookSignatureInvalidTotal
+} from "./observability/metrics.js";
 import { ensureNotReplay } from "./modules/payments/webhook-idempotency.js";
 import { ACTIVITY_EVENT_TYPES, type ActivityEventType, fetchEventActivity } from "./modules/activity/service.js";
 
@@ -65,6 +72,7 @@ const checkinScanTotal = new Counter({
 
 const webhookRateWindowMs = 60_000;
 const webhookRateLimitPerWindow = 120;
+// TODO(phase-2.3): mover a Redis para soporte multi-instancia.
 const webhookHits = new Map<string, { count: number; windowStartedAt: number }>();
 
 await app.register(cors, { origin: true });
@@ -705,10 +713,6 @@ app.post("/late-payment-cases/:id/resolve", { preHandler: verifyAuth }, async (r
 
   await requireMembership(user.userId, lateCase.order.organizerId, ["owner", "admin", "staff"]);
 
-  if (lateCase.status !== "PENDING") {
-    throw app.httpErrors.conflict("LatePaymentCase ya resuelto");
-  }
-
   const statusByAction = {
     ACCEPT: "ACCEPTED",
     REJECT: "REJECTED",
@@ -717,11 +721,25 @@ app.post("/late-payment-cases/:id/resolve", { preHandler: verifyAuth }, async (r
   } as const;
 
   const nextStatus = statusByAction[body.action];
+  const allowedTransitions: Record<string, readonly string[]> = {
+    PENDING: ["ACCEPTED", "REJECTED", "REFUND_REQUESTED", "REFUNDED"],
+    REFUND_REQUESTED: ["REFUNDED"]
+  };
+
+  const allowedNext = allowedTransitions[lateCase.status] ?? [];
+  if (!allowedNext.includes(nextStatus)) {
+    throw app.httpErrors.conflict(`Transición inválida: ${lateCase.status} -> ${nextStatus}`);
+  }
+
   const resolvedAt = new Date();
 
   const updated = await prisma.$transaction(async (tx) => {
-    const resolved = await tx.latePaymentCase.update({
-      where: { id: lateCase.id },
+    const updateResult = await tx.latePaymentCase.updateMany({
+      where: {
+        id: lateCase.id,
+        status: lateCase.status,
+        updatedAt: lateCase.updatedAt
+      },
       data: {
         status: nextStatus,
         resolutionNotes: body.resolutionNotes ?? null,
@@ -729,6 +747,12 @@ app.post("/late-payment-cases/:id/resolve", { preHandler: verifyAuth }, async (r
         resolvedBy: user.userId
       }
     });
+
+    if (updateResult.count === 0) {
+      throw app.httpErrors.conflict("LatePaymentCase actualizado por otro operador");
+    }
+
+    const resolved = await tx.latePaymentCase.findUniqueOrThrow({ where: { id: lateCase.id } });
 
     await tx.order.update({
       where: { id: lateCase.order.id },
@@ -749,6 +773,7 @@ app.post("/late-payment-cases/:id/resolve", { preHandler: verifyAuth }, async (r
       payload: {
         latePaymentCaseId: lateCase.id,
         action: body.action,
+        previousStatus: lateCase.status,
         status: nextStatus,
         resolutionNotes: body.resolutionNotes ?? null
       }
@@ -756,6 +781,16 @@ app.post("/late-payment-cases/:id/resolve", { preHandler: verifyAuth }, async (r
 
     return resolved;
   });
+
+  req.log.info({
+    correlationId: req.correlationId,
+    caseId: lateCase.id,
+    orderId: lateCase.order.id,
+    action: body.action,
+    actorId: user.userId,
+    previousStatus: lateCase.status,
+    status: updated.status
+  }, "late payment case resolved");
 
   await syncLatePaymentPendingGauge(updated.provider);
 
@@ -786,7 +821,20 @@ app.post("/webhooks/payments/:provider", async (req: any) => {
 
   const signature = req.headers["x-webhook-signature"];
   if (env.paymentsWebhookSecret) {
-    if (typeof signature !== "string" || signature !== env.paymentsWebhookSecret) {
+    const payloadString = JSON.stringify(body);
+    const expected = createHmac("sha256", env.paymentsWebhookSecret).update(payloadString).digest("hex");
+
+    if (typeof signature !== "string") {
+      webhookSignatureInvalidTotal.inc({ provider });
+      throw app.httpErrors.unauthorized("invalid webhook signature");
+    }
+
+    const provided = Buffer.from(signature, "utf8");
+    const expectedBuf = Buffer.from(expected, "utf8");
+    const valid = provided.length === expectedBuf.length && timingSafeEqual(provided, expectedBuf);
+
+    if (!valid) {
+      webhookSignatureInvalidTotal.inc({ provider });
       throw app.httpErrors.unauthorized("invalid webhook signature");
     }
   }
@@ -799,6 +847,8 @@ app.post("/webhooks/payments/:provider", async (req: any) => {
 
   const freshEvent = await ensureNotReplay(provider, externalEventId);
   if (!freshEvent) {
+    webhookReplaysTotal.inc({ provider });
+    req.log.info({ correlationId: req.correlationId, provider, externalEventId }, "payments webhook replay ignored");
     return { ok: true, replay: true };
   }
 
