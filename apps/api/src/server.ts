@@ -36,6 +36,30 @@ const httpInFlightRequests = new Gauge({
   help: "Requests HTTP en vuelo"
 });
 
+const checkoutReserveTotal = new Counter({
+  name: "checkout_reserve_total",
+  help: "Total de intentos de reserva de checkout",
+  labelNames: ["status"]
+});
+
+const checkoutConfirmTotal = new Counter({
+  name: "checkout_confirm_total",
+  help: "Total de confirmaciones de checkout",
+  labelNames: ["status"]
+});
+
+const ticketValidateTotal = new Counter({
+  name: "ticket_validate_total",
+  help: "Total de validaciones de ticket por código",
+  labelNames: ["status"]
+});
+
+const checkinScanTotal = new Counter({
+  name: "checkin_scan_total",
+  help: "Total de escaneos de check-in",
+  labelNames: ["status"]
+});
+
 await app.register(cors, { origin: true });
 await app.register(sensible);
 await app.register(jwt, { secret: env.jwtAccessSecret });
@@ -220,7 +244,8 @@ app.post("/checkout/reserve", async (req: any) => {
   const now = new Date();
   const expiresAt = new Date(now.getTime() + 10 * 60 * 1000);
 
-  return prisma.$transaction(async (tx) => {
+  try {
+    const order = await prisma.$transaction(async (tx) => {
     const event = await tx.event.findUniqueOrThrow({ where: { id: body.eventId } });
     if (event.organizerId !== body.organizerId) {
       throw new Error("Evento fuera del organizador");
@@ -298,8 +323,15 @@ app.post("/checkout/reserve", async (req: any) => {
       payload: { customerEmail: body.customerEmail, itemCount: body.items.length, totalCents }
     }, tx);
 
-    return createdOrder;
-  });
+      return createdOrder;
+    });
+
+    checkoutReserveTotal.inc({ status: "reserved" });
+    return order;
+  } catch (error) {
+    checkoutReserveTotal.inc({ status: "error" });
+    throw error;
+  }
 });
 
 app.post("/checkout/confirm", async (req: any) => {
@@ -307,7 +339,8 @@ app.post("/checkout/confirm", async (req: any) => {
   const correlationId = req.correlationId as string;
   req.log.info({ correlationId, orderId: body.orderId }, "checkout confirm request");
 
-  const order = await prisma.$transaction(async (tx) => {
+  try {
+    const order = await prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${body.orderId} FOR UPDATE`;
 
     const duplicatePayment = await tx.payment.findUnique({
@@ -392,27 +425,34 @@ app.post("/checkout/confirm", async (req: any) => {
     return tx.order.findUnique({ where: { id: order.id }, include: { tickets: true } });
   });
 
-  if (order?.status === "paid") {
-    await notificationQueue.add(
-      "order_paid_confirmation",
-      { type: "order_paid_confirmation", orderId: order.id, meta: { correlationId } },
-      { jobId: `order_paid_confirmation:${order.id}` }
-    );
-  }
+    if (order?.status === "paid") {
+      await notificationQueue.add(
+        "order_paid_confirmation",
+        { type: "order_paid_confirmation", orderId: order.id, meta: { correlationId } },
+        { jobId: `order_paid_confirmation:${order.id}` }
+      );
+    }
 
-  return order;
+    checkoutConfirmTotal.inc({ status: order?.status === "paid" ? "paid" : "non_paid" });
+    return order;
+  } catch (error) {
+    checkoutConfirmTotal.inc({ status: "error" });
+    throw error;
+  }
 });
 
 app.get("/tickets/validate/:code", async (req: any) => {
   const code = req.params.code;
   const validation = await validateTicketRecord(prisma, code);
   if (!validation.valid) {
+    ticketValidateTotal.inc({ status: "invalid" });
     return {
       valid: false,
       reason: validation.reason,
       ...(validation.ticket?.checkedInAt ? { checkedInAt: validation.ticket.checkedInAt } : {})
     };
   }
+  ticketValidateTotal.inc({ status: "valid" });
   return { valid: true, ticketId: validation.ticket.id, eventId: validation.ticket.eventId };
 });
 
@@ -456,6 +496,7 @@ app.post("/checkin/scan", { preHandler: verifyAuth }, async (req: any) => {
 
   return prisma.$transaction(async (tx) => {
     if (!verifyTicketCode(body.code)) {
+      checkinScanTotal.inc({ status: "invalid" });
       return { ok: false, reason: "Firma inválida" };
     }
 
@@ -464,11 +505,13 @@ app.post("/checkin/scan", { preHandler: verifyAuth }, async (req: any) => {
     `;
 
     if (lockRows.length === 0) {
+      checkinScanTotal.inc({ status: "invalid" });
       return { ok: false, reason: "Ticket inexistente" };
     }
 
     const validation = await validateTicketRecord(tx as unknown as TicketDbLike, body.code);
     if (!validation.valid && !validation.ticket) {
+      checkinScanTotal.inc({ status: "invalid" });
       return { ok: false, reason: validation.reason };
     }
 
@@ -487,6 +530,7 @@ app.post("/checkin/scan", { preHandler: verifyAuth }, async (req: any) => {
           gate: body.gate
         }
       });
+      checkinScanTotal.inc({ status: "invalid" });
       return { ok: false, reason: validation.reason };
     }
 
@@ -502,6 +546,7 @@ app.post("/checkin/scan", { preHandler: verifyAuth }, async (req: any) => {
           gate: body.gate
         }
       });
+      checkinScanTotal.inc({ status: "duplicate_blocked" });
       return { ok: false, reason: "Doble check-in bloqueado" };
     }
 
@@ -523,6 +568,7 @@ app.post("/checkin/scan", { preHandler: verifyAuth }, async (req: any) => {
       payload: { scannedByUserId: user.userId }
     }, tx);
 
+    checkinScanTotal.inc({ status: "valid" });
     return { ok: true };
   });
 });
