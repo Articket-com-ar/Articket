@@ -86,6 +86,11 @@ jobs:
         if: always()
         run: pnpm -w seed:verify > seed-verify.txt || true
 
+      - name: summarize seed verification
+        if: always()
+        run: |
+          node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync('seed-verify.json','utf8')); let s='## Seed verify (demo_rich)\n'; s+=`- ok: ${p.ok}\n`; s+=`- events: ${p.events}\n`; s+=`- orders: ${p.orders} (paid: ${p.ordersPaid}, refunded: ${p.ordersRefunded}, canceled: ${p.ordersCanceled}, expired: ${p.ordersExpired})\n`; s+=`- tickets: ${p.tickets} (issued: ${p.ticketsIssued}, checkedIn: ${p.ticketsCheckedIn})\n`; s+=`- reservedActive: ${p.reservedActive}\n`; s+=`- revenuePaid: ${p.revenuePaid}\n`; s+=`- emailFailures: ${p.emailFailures}\n`; if(p.invariantViolations?.length){ s+='- invariantViolations:\n'; for(const v of p.invariantViolations){ s+=`  - ${v.key}: ${v.violations}\n`; } } else { s+='- invariantViolations: none\n'; } fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, s);"
+
       - name: upload seed verification artifact
         if: always()
         uses: actions/upload-artifact@v4
