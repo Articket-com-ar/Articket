@@ -82,12 +82,18 @@ jobs:
       - name: verify demo_rich invariants (json)
         run: pnpm -w seed:verify -- --json > seed-verify.json
 
+      - name: verify demo_rich invariants (human)
+        if: always()
+        run: pnpm -w seed:verify > seed-verify.txt || true
+
       - name: upload seed verification artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: seed-verify-demo-rich
-          path: seed-verify.json
+          path: |
+            seed-verify.json
+            seed-verify.txt
           if-no-files-found: error
 
   ci:
