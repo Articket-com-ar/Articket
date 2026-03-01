@@ -20,7 +20,6 @@ type VerifySummary = {
   tickets?: number;
   ticketsIssued?: number;
   ticketsCheckedIn?: number;
-  checkedIn?: number;
   reservedActive?: number;
   ticketTypes?: number;
   revenuePaid?: number;
@@ -47,7 +46,7 @@ function printHuman(summary: VerifySummary) {
   if (summary.orders != null) console.log(`✔ Orders: ${summary.orders}`);
   if (summary.tickets != null) console.log(`✔ Tickets: ${summary.tickets}`);
   if (summary.revenuePaid != null) console.log(`✔ Revenue Paid: ${summary.revenuePaid}`);
-  if (summary.checkedIn != null) console.log(`✔ CheckedIn: ${summary.checkedIn}`);
+  if (summary.ticketsCheckedIn != null) console.log(`✔ TicketsCheckedIn: ${summary.ticketsCheckedIn}`);
 
   if (!summary.ok) {
     console.error("✖ Invariant violations:");
@@ -216,7 +215,6 @@ async function verify(): Promise<VerifySummary> {
     orders: totalOrders,
     ordersPaid: paidOrders,
     tickets: totalTickets,
-    checkedIn,
     ticketsIssued: await prisma.ticket.count({ where: { eventId, code: { startsWith: DEMO_TICKET_PREFIX }, status: "issued" } }),
     ticketsCheckedIn: checkedIn,
     ticketTypes,
