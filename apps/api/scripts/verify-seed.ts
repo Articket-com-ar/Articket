@@ -4,8 +4,23 @@ const prisma = new PrismaClient();
 
 type Check = { label: string; ok: boolean; detail?: string };
 
+type VerifySummary = {
+  ok: boolean;
+  events?: number;
+  orders?: number;
+  ordersPaid?: number;
+  tickets?: number;
+  checkedIn?: number;
+  ticketTypes?: number;
+  revenuePaid?: number;
+  emailFailures?: number;
+  invariantViolations: string[];
+  error?: string;
+};
+
 const DEMO_ORDER_PREFIX = "DEMO-ORDER-";
 const DEMO_TICKET_PREFIX = "DEMO-TICKET-";
+const asJson = process.argv.includes("--json");
 
 async function scalarInt(sql: string): Promise<number> {
   const rows = await prisma.$queryRawUnsafe<Array<{ value: bigint | number }>>(sql);
@@ -16,14 +31,48 @@ function push(checks: Check[], label: string, ok: boolean, detail?: string) {
   checks.push({ label, ok, detail });
 }
 
-async function main() {
+function printHuman(summary: VerifySummary) {
+  if (summary.events != null) console.log(`✔ Events: ${summary.events}`);
+  if (summary.orders != null) console.log(`✔ Orders: ${summary.orders}`);
+  if (summary.tickets != null) console.log(`✔ Tickets: ${summary.tickets}`);
+  if (summary.revenuePaid != null) console.log(`✔ Revenue Paid: ${summary.revenuePaid}`);
+  if (summary.checkedIn != null) console.log(`✔ CheckedIn: ${summary.checkedIn}`);
+
+  if (!summary.ok) {
+    console.error("✖ Invariant violations:");
+    for (const label of summary.invariantViolations) console.error(` - ${label}`);
+    if (summary.error) console.error(` - error: ${summary.error}`);
+    return;
+  }
+
+  console.log("✔ No invariant violations");
+}
+
+function printResult(summary: VerifySummary) {
+  if (asJson) {
+    console.log(JSON.stringify(summary));
+  } else {
+    printHuman(summary);
+  }
+}
+
+async function verify(): Promise<VerifySummary> {
   const checks: Check[] = [];
 
   const organizer = await prisma.organizer.findUnique({ where: { slug: "demo-org" }, select: { id: true } });
-  const event = await prisma.event.findUnique({ where: { organizerId_slug: organizer ? { organizerId: organizer.id, slug: "demo-event-1" } : { organizerId: "00000000-0000-0000-0000-000000000000", slug: "demo-event-1" } }, select: { id: true } }).catch(() => null);
+  const event = organizer
+    ? await prisma.event.findUnique({
+        where: { organizerId_slug: { organizerId: organizer.id, slug: "demo-event-1" } },
+        select: { id: true }
+      })
+    : null;
 
   if (!organizer || !event) {
-    throw new Error("demo_rich dataset missing (demo-org / demo-event-1 not found). Run SEED_PROFILE=demo_rich pnpm -w db:seed first.");
+    return {
+      ok: false,
+      invariantViolations: ["dataset.demo_rich.missing"],
+      error: "demo_rich dataset missing (demo-org / demo-event-1 not found). Run SEED_PROFILE=demo_rich pnpm -w db:seed first."
+    };
   }
 
   const eventId = event.id;
@@ -33,10 +82,11 @@ async function main() {
   const totalTickets = await prisma.ticket.count({ where: { eventId, code: { startsWith: DEMO_TICKET_PREFIX } } });
   const checkedIn = await prisma.ticket.count({ where: { eventId, code: { startsWith: DEMO_TICKET_PREFIX }, status: "checked_in" } });
   const ticketTypes = await prisma.ticketType.count({ where: { eventId } });
-  const revenuePaid = (await prisma.order.aggregate({
-    where: { eventId, status: "paid", orderNumber: { startsWith: DEMO_ORDER_PREFIX } },
-    _sum: { totalCents: true }
-  }))._sum.totalCents ?? 0;
+  const revenuePaid =
+    (await prisma.order.aggregate({
+      where: { eventId, status: "paid", orderNumber: { startsWith: DEMO_ORDER_PREFIX } },
+      _sum: { totalCents: true }
+    }))._sum.totalCents ?? 0;
 
   push(checks, "dataset.minimum.events>=3", eventsCount >= 3, `events=${eventsCount}`);
   push(checks, "dataset.minimum.ordersPaid>=10", paidOrders >= 10, `ordersPaid=${paidOrders}`);
@@ -148,26 +198,33 @@ async function main() {
   const failed = checks.filter((c) => !c.ok);
 
   const totalOrders = await prisma.order.count({ where: { eventId, orderNumber: { startsWith: DEMO_ORDER_PREFIX } } });
-  console.log(`✔ Events: ${eventsCount}`);
-  console.log(`✔ Orders: ${totalOrders}`);
-  console.log(`✔ Tickets: ${totalTickets}`);
-  console.log(`✔ Revenue Paid: ${revenuePaid}`);
-  console.log(`✔ CheckedIn: ${checkedIn}`);
 
-  if (failed.length > 0) {
-    console.error("✖ Invariant violations:");
-    for (const item of failed) {
-      console.error(` - ${item.label}${item.detail ? ` (${item.detail})` : ""}`);
-    }
-    process.exit(1);
-  }
-
-  console.log("✔ No invariant violations");
+  return {
+    ok: failed.length === 0,
+    events: eventsCount,
+    orders: totalOrders,
+    ordersPaid: paidOrders,
+    tickets: totalTickets,
+    checkedIn,
+    ticketTypes,
+    revenuePaid,
+    emailFailures,
+    invariantViolations: failed.map((f) => (f.detail ? `${f.label} (${f.detail})` : f.label))
+  };
 }
 
-main()
+verify()
+  .then((summary) => {
+    printResult(summary);
+    if (!summary.ok) process.exit(1);
+  })
   .catch((error) => {
-    console.error(error instanceof Error ? error.message : error);
+    const summary: VerifySummary = {
+      ok: false,
+      invariantViolations: ["verify.runtime.error"],
+      error: error instanceof Error ? error.message : String(error)
+    };
+    printResult(summary);
     process.exit(1);
   })
   .finally(async () => {
