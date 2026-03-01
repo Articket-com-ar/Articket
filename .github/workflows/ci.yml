@@ -22,9 +22,69 @@ jobs:
       - name: lint ADR contract
         run: node ./scripts/lint-adrs.js
 
-  ci:
+  seed-verify-demo-rich:
     runs-on: ubuntu-latest
     needs: adr-check
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: articket
+          POSTGRES_USER: articket
+          POSTGRES_PASSWORD: ci_pg_required_token_do_not_use
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U articket -d articket"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://articket:ci_pg_required_token_do_not_use@localhost:5432/articket?schema=public
+      POSTGRES_PASSWORD: ci_pg_required_token_do_not_use
+      REDIS_URL: redis://localhost:6379
+      SEED_PROFILE: demo_rich
+      JWT_ACCESS_SECRET: ci_jwt_access_secret_min_length_24_chars
+      JWT_REFRESH_SECRET: ci_jwt_refresh_secret_min_length_24_chars
+      QR_SECRET: ci_qr_secret_minimum_24_chars_long
+      PAYMENTS_WEBHOOK_SECRET: ci_webhook_secret_min_24_chars
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup node 18 (pinned)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18.20.4"
+
+      - name: enable corepack
+        run: corepack enable
+
+      - name: install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: migrate
+        run: pnpm -w db:migrate
+
+      - name: seed demo_rich
+        run: pnpm -w db:seed
+
+      - name: verify demo_rich invariants
+        run: pnpm -w seed:verify
+
+  ci:
+    runs-on: ubuntu-latest
+    needs: [adr-check, seed-verify-demo-rich]
     env:
       POSTGRES_PASSWORD: ci_pg_required_token_do_not_use
       JWT_ACCESS_SECRET: ci_jwt_access_secret_min_length_24_chars
