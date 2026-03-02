@@ -131,7 +131,7 @@ jobs:
         run: |
           ls -l seed-verify.json || true
           test -s seed-verify.json || (echo "seed-verify.json is empty" && exit 1)
-          node -e "const fs=require('fs'); JSON.parse(fs.readFileSync('seed-verify.json','utf8')); console.log('seed-verify.json parse ok');"
+          node -e "const fs=require('fs'); const p='seed-verify.json'; console.log('parsing', p); JSON.parse(fs.readFileSync(p,'utf8')); console.log('seed-verify.json parse ok');"
 
       - name: debug seed-verify json head
         if: always()
