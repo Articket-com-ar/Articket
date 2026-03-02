@@ -89,8 +89,20 @@ jobs:
       - name: install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: show prisma versions
+        run: |
+          pnpm -w ls prisma @prisma/client --depth 0 || true
+          pnpm --filter @articket/api ls prisma @prisma/client --depth 0 || true
+
       - name: prisma generate
         run: pnpm prisma generate --schema=apps/api/prisma/schema.prisma
+
+      - name: sanity check prisma client generated
+        run: |
+          node -e "require('@prisma/client'); console.log('prisma client load ok')"
+          ls -la node_modules/.prisma || true
+          find node_modules -maxdepth 3 -type d -name ".prisma" -print || true
+          find apps/api -maxdepth 4 -type d -name ".prisma" -print || true
 
       - name: migrate
         run: pnpm -w db:migrate
