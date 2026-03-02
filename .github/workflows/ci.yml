@@ -125,7 +125,16 @@ jobs:
 
       - name: verify demo_rich invariants (json)
         run: |
-          pnpm -w --silent seed:verify -- --json > seed-verify.json
+          pnpm -w --silent seed:verify -- --json | sed -n '/^[{\[]/,$p' | head -n 1 > seed-verify.json
+
+      - name: assert seed-verify.json is pure json
+        run: |
+          test -s seed-verify.json || (echo "seed-verify.json is empty" && exit 1)
+          head -c 1 seed-verify.json | grep -E '(\{|\[)' || (echo "seed-verify.json does not start with JSON token" && exit 1)
+
+      - name: debug seed-verify json head
+        if: always()
+        run: head -n 2 seed-verify.json || true
 
       - name: verify demo_rich invariants (human)
         if: always()
