@@ -89,6 +89,13 @@ jobs:
       - name: install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: debug prisma deps in api
+        run: |
+          cd apps/api
+          cat package.json | sed -n '1,160p'
+          ls -la node_modules/@prisma || true
+          ls -la node_modules/.prisma || true
+
       - name: show prisma versions
         run: |
           pnpm -w ls prisma @prisma/client --depth 0 || true
