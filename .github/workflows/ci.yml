@@ -89,8 +89,8 @@ jobs:
       - name: install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: prisma generate (api)
-        run: pnpm --filter @articket/api exec prisma generate
+      - name: prisma generate
+        run: pnpm prisma generate --schema=apps/api/prisma/schema.prisma
 
       - name: migrate
         run: pnpm -w db:migrate
