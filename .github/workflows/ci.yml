@@ -95,7 +95,7 @@ jobs:
           pnpm --filter @articket/api ls prisma @prisma/client --depth 0 || true
 
       - name: prisma generate
-        run: pnpm prisma generate --schema=apps/api/prisma/schema.prisma
+        run: pnpm --filter @articket/api exec prisma generate
 
       - name: sanity check prisma client generated
         run: |
