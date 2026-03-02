@@ -98,11 +98,7 @@ jobs:
         run: pnpm --filter @articket/api exec prisma generate
 
       - name: sanity check prisma client generated
-        run: |
-          node -e "require('@prisma/client'); console.log('prisma client load ok')"
-          ls -la node_modules/.prisma || true
-          find node_modules -maxdepth 3 -type d -name ".prisma" -print || true
-          find apps/api -maxdepth 4 -type d -name ".prisma" -print || true
+        run: pnpm --filter @articket/api exec node -e "require('@prisma/client'); console.log('prisma client load ok')"
 
       - name: migrate
         run: pnpm -w db:migrate
