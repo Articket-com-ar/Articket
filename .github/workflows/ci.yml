@@ -22,9 +22,167 @@ jobs:
       - name: lint ADR contract
         run: node ./scripts/lint-adrs.js
 
-  ci:
+  seed-verify-demo-rich:
     runs-on: ubuntu-latest
     needs: adr-check
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: articket
+          POSTGRES_USER: articket
+          POSTGRES_PASSWORD: ci_pg_required_token_do_not_use
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U articket -d articket"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://articket:ci_pg_required_token_do_not_use@localhost:5432/articket?schema=public
+      POSTGRES_PASSWORD: ci_pg_required_token_do_not_use
+      REDIS_URL: redis://localhost:6379
+      SEED_PROFILE: demo_rich
+      JWT_ACCESS_SECRET: ci_jwt_access_secret_min_length_24_chars
+      JWT_REFRESH_SECRET: ci_jwt_refresh_secret_min_length_24_chars
+      QR_SECRET: ci_qr_secret_minimum_24_chars_long
+      PAYMENTS_WEBHOOK_SECRET: ci_webhook_secret_min_24_chars
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup node 18 (pinned)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18.20.4"
+
+      - name: setup pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 9.12.0
+
+      - name: debug lockfile
+        run: |
+          pwd
+          ls -la
+          test -f pnpm-lock.yaml && echo "pnpm-lock.yaml exists" || (echo "pnpm-lock.yaml missing" && exit 1)
+          node -p "require('./package.json').packageManager || 'no packageManager field'"
+          head -n 20 pnpm-lock.yaml
+
+      - name: debug pnpm version
+        run: |
+          which pnpm
+          pnpm -v
+          node -v
+
+      - name: install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: debug prisma deps in api
+        run: |
+          cd apps/api
+          cat package.json | sed -n '1,160p'
+          ls -la node_modules/@prisma || true
+          ls -la node_modules/.prisma || true
+
+      - name: show prisma versions
+        run: |
+          pnpm -w ls prisma @prisma/client --depth 0 || true
+          pnpm --filter @articket/api ls prisma @prisma/client --depth 0 || true
+
+      - name: prisma generate
+        run: |
+          cd apps/api
+          pnpm exec prisma generate
+
+      - name: sanity check prisma client generated
+        run: |
+          cd apps/api
+          node -e "require('@prisma/client'); console.log('prisma client load ok')"
+
+      - name: migrate
+        run: pnpm -w db:migrate
+
+      - name: debug prisma resolution before seed
+        run: |
+          cd apps/api
+          node -p "process.cwd()"
+          node -p "require.resolve('@prisma/client')"
+
+      - name: seed demo_rich
+        run: pnpm -w db:seed
+
+      - name: verify demo_rich invariants (json)
+        run: |
+          pnpm -w --silent seed:verify -- --json > seed-verify.json
+
+      - name: assert seed-verify.json parses
+        run: |
+          test -s seed-verify.json || (echo "seed-verify.json is empty" && exit 1)
+          node -e "const fs=require('fs'); JSON.parse(fs.readFileSync('seed-verify.json','utf8')); console.log('seed-verify.json parse ok');"
+
+      - name: assert seed-verify.json is single non-empty line
+        run: |
+          node -e "const fs=require('fs'); const s=fs.readFileSync('seed-verify.json','utf8'); const lines=s.split(/\r?\n/).filter(Boolean); if(lines.length!==1){console.error('seed-verify.json must contain exactly 1 non-empty line, got', lines.length); process.exit(1);} console.log('seed-verify.json single-line ok');"
+
+      - name: verify demo_rich invariants (human)
+        if: always()
+        run: pnpm -w seed:verify > seed-verify.txt || true
+
+      - name: summarize seed verification
+        if: always()
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          if (!fs.existsSync('seed-verify.json')) {
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, '## Seed verify (demo_rich)\n- seed-verify.json missing\n');
+            process.exit(0);
+          }
+          const payload = JSON.parse(fs.readFileSync('seed-verify.json','utf8'));
+          let s = '## Seed verify (demo_rich)\n';
+          s += `- ok: ${payload.ok}\n`;
+          s += `- events: ${payload.events}\n`;
+          s += `- orders: ${payload.orders} (paid: ${payload.ordersPaid}, refunded: ${payload.ordersRefunded}, canceled: ${payload.ordersCanceled}, expired: ${payload.ordersExpired})\n`;
+          s += `- tickets: ${payload.tickets} (issued: ${payload.ticketsIssued}, checkedIn: ${payload.ticketsCheckedIn})\n`;
+          s += `- reservedActive: ${payload.reservedActive}\n`;
+          s += `- revenuePaid: ${payload.revenuePaid}\n`;
+          s += `- emailFailures: ${payload.emailFailures}\n`;
+          if (payload.invariantViolations?.length) {
+            s += `- invariantViolations:\n`;
+            for (const v of payload.invariantViolations) {
+              s += ` - ${v.key}: ${v.violations}\n`;
+            }
+          } else {
+            s += `- invariantViolations: none\n`;
+          }
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, s);
+          NODE
+
+      - name: upload seed verification artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seed-verify-demo-rich
+          path: |
+            seed-verify.json
+            seed-verify.txt
+          if-no-files-found: error
+
+  ci:
+    runs-on: ubuntu-latest
+    needs: [adr-check, seed-verify-demo-rich]
     env:
       POSTGRES_PASSWORD: ci_pg_required_token_do_not_use
       JWT_ACCESS_SECRET: ci_jwt_access_secret_min_length_24_chars
