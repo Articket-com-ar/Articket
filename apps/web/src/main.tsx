@@ -49,7 +49,7 @@ function Dashboard() {
   const opsDashboard = useQuery({
     queryKey: ["ops-dashboard", organizerId],
     enabled: Boolean(organizerId),
-    queryFn: () => api<any>(`/ops/dashboard?organizerId=${organizerId}`)
+    queryFn: () => api<any>("/ops/dashboard")
   });
 
   const loading = orgLoading || opsDashboard.isLoading;
@@ -114,7 +114,7 @@ function Dashboard() {
               {(opsDashboard.data?.activity ?? []).map((item: any) => (
                 <li key={item.id} className="rounded border border-slate-200 px-3 py-2">
                   <span className="font-medium">{item.type}</span> · {item.aggregateId}
-                  <div className="text-xs text-slate-500">{new Date(item.createdAt).toLocaleString()}</div>
+                  <div className="text-xs text-slate-500">{new Date(item.occurredAt).toLocaleString()}</div>
                 </li>
               ))}
               {(opsDashboard.data?.activity ?? []).length === 0 && <li className="text-slate-500">Sin actividad reciente</li>}

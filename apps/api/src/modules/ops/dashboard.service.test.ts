@@ -2,13 +2,24 @@ import { describe, expect, it } from "vitest";
 import { buildOpsDashboard } from "./dashboard.service.js";
 
 describe("buildOpsDashboard", () => {
-  it("returns valid empty-safe structure", async () => {
+  it("forbids access when user has no organizer membership", async () => {
     const db: any = {
       membership: {
-        findUnique: async () => ({ role: "owner" })
+        findFirst: async () => null
+      }
+    };
+
+    await expect(buildOpsDashboard({ userId: "u1", email: "x@test" }, db)).rejects.toThrow("FORBIDDEN");
+  });
+
+  it("returns contract shape with empty-safe defaults", async () => {
+    const db: any = {
+      membership: {
+        findFirst: async () => ({ organizerId: "11111111-1111-1111-1111-111111111111" })
       },
       order: {
-        groupBy: async () => []
+        groupBy: async () => [],
+        aggregate: async () => ({ _sum: { totalCents: 0, subtotalCents: 0 } })
       },
       latePaymentCase: {
         count: async () => 0
@@ -21,7 +32,7 @@ describe("buildOpsDashboard", () => {
       }
     };
 
-    const result = await buildOpsDashboard({ userId: "u1", email: "x@test" }, "11111111-1111-1111-1111-111111111111", db);
+    const result = await buildOpsDashboard({ userId: "u1", email: "x@test" }, db);
 
     expect(result).toEqual({
       window24h: {
