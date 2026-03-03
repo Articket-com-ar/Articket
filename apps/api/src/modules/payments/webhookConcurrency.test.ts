@@ -1,8 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { prisma } from "../../lib/prisma.js";
 
-const hasDatabase = Boolean(process.env.DATABASE_URL);
-
 if (!process.env.API_PORT) process.env.API_PORT = "3399";
 process.env.JWT_ACCESS_SECRET ||= "test-access-secret-min-24-ch";
 process.env.JWT_REFRESH_SECRET ||= "test-refresh-secret-24-ch";
@@ -33,8 +31,10 @@ async function waitForHealth() {
   throw new Error("server did not become healthy in time");
 }
 
-describe.skipIf(!hasDatabase)("webhook concurrency", () => {
+describe("webhook concurrency", () => {
   beforeAll(async () => {
+    expect(process.env.DATABASE_URL, "DATABASE_URL is required for webhook concurrency integration test").toBeTruthy();
+
     await import("../../server.js");
     await waitForHealth();
 
@@ -128,44 +128,55 @@ describe.skipIf(!hasDatabase)("webhook concurrency", () => {
       providerPaymentId: created.providerRef
     };
 
-    const [r1, r2] = await Promise.all([
-      fetch(`${baseUrl}/webhooks/payments/${provider}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload)
-      }),
-      fetch(`${baseUrl}/webhooks/payments/${provider}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload)
-      })
-    ]);
+    const previousBarrier = process.env.PAYMENTS_CONCURRENCY_TEST_BARRIER_MS;
+    process.env.PAYMENTS_CONCURRENCY_TEST_BARRIER_MS = "50";
 
-    expect(r1.status).toBeLessThan(300);
-    expect(r2.status).toBeLessThan(300);
+    try {
+      const [r1, r2] = await Promise.all([
+        fetch(`${baseUrl}/webhooks/payments/${provider}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload)
+        }),
+        fetch(`${baseUrl}/webhooks/payments/${provider}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload)
+        })
+      ]);
 
-    const b1 = await r1.json();
-    const b2 = await r2.json();
-    const isExpectedSecondary = (b1?.deduped || b1?.inFlight || b2?.deduped || b2?.inFlight);
-    expect(isExpectedSecondary).toBe(true);
+      expect(r1.status).toBeLessThan(300);
+      expect(r2.status).toBeLessThan(300);
 
-    const order = await prisma.order.findUniqueOrThrow({
-      where: { id: created.orderId },
-      include: { tickets: true }
-    });
+      const b1 = await r1.json();
+      const b2 = await r2.json();
+      const isExpectedSecondary = (b1?.deduped || b1?.inFlight || b2?.deduped || b2?.inFlight);
+      expect(isExpectedSecondary).toBe(true);
 
-    expect(order.status).toBe("paid");
-    expect(order.tickets.length).toBe(1);
+      const order = await prisma.order.findUniqueOrThrow({
+        where: { id: created.orderId },
+        include: { tickets: true }
+      });
 
-    const providerEvents = await prisma.paymentProviderEvent.findMany({
-      where: { provider, providerEventId: created.providerEventId }
-    });
-    expect(providerEvents.length).toBe(1);
-    expect(providerEvents[0].status).toBe("processed");
+      expect(order.status).toBe("paid");
+      expect(order.tickets.length).toBe(1);
 
-    const payments = await prisma.payment.findMany({
-      where: { orderId: created.orderId, provider, providerRef: created.providerRef }
-    });
-    expect(payments.length).toBe(1);
+      const providerEvents = await prisma.paymentProviderEvent.findMany({
+        where: { provider, providerEventId: created.providerEventId }
+      });
+      expect(providerEvents.length).toBe(1);
+      expect(providerEvents[0].status).toBe("processed");
+
+      const payments = await prisma.payment.findMany({
+        where: { orderId: created.orderId, provider, providerRef: created.providerRef }
+      });
+      expect(payments.length).toBe(1);
+    } finally {
+      if (previousBarrier == null) {
+        delete process.env.PAYMENTS_CONCURRENCY_TEST_BARRIER_MS;
+      } else {
+        process.env.PAYMENTS_CONCURRENCY_TEST_BARRIER_MS = previousBarrier;
+      }
+    }
   });
 });

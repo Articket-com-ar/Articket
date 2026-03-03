@@ -235,6 +235,12 @@ async function applyWebhookPaidTransition(params: {
       }
     });
 
+    // Used only for deterministic concurrency tests.
+    const barrierMs = Number(process.env.PAYMENTS_CONCURRENCY_TEST_BARRIER_MS ?? 0);
+    if (barrierMs > 0 && process.env.NODE_ENV === "test") {
+      await new Promise((resolve) => setTimeout(resolve, barrierMs));
+    }
+
     const updated = await tx.order.updateMany({
       where: { id: order.id, status: { in: ["pending", "reserved"] } },
       data: { status: "paid" }
