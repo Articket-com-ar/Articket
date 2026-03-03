@@ -18,6 +18,9 @@ import {
   latePaymentCasesPending,
   latePaymentCasesTotal,
   manualOverrideEntriesTotal,
+  paymentsIdempotencyDedupTotal,
+  paymentsPaidTransitionTotal,
+  paymentsWebhookTotal,
   webhookReplaysTotal,
   webhookSignatureInvalidTotal
 } from "./observability/metrics.js";
@@ -967,11 +970,13 @@ app.post("/webhooks/payments/:provider", async (req: any) => {
   if (env.paymentsWebhookSecret) {
     if (typeof signature !== "string") {
       webhookSignatureInvalidTotal.inc({ provider });
+      paymentsWebhookTotal.inc({ provider, outcome: "invalid" });
       throw app.httpErrors.unauthorized("invalid webhook signature");
     }
 
     if (!req.rawBody) {
       webhookSignatureInvalidTotal.inc({ provider });
+      paymentsWebhookTotal.inc({ provider, outcome: "invalid" });
       throw app.httpErrors.unauthorized("missing raw body for signature verification");
     }
 
@@ -980,18 +985,21 @@ app.post("/webhooks/payments/:provider", async (req: any) => {
 
     if (!timestamp) {
       webhookSignatureInvalidTotal.inc({ provider });
+      paymentsWebhookTotal.inc({ provider, outcome: "invalid" });
       throw app.httpErrors.unauthorized("missing webhook timestamp");
     }
 
     const ts = Number(timestamp);
     if (!Number.isFinite(ts)) {
       webhookSignatureInvalidTotal.inc({ provider });
+      paymentsWebhookTotal.inc({ provider, outcome: "invalid" });
       throw app.httpErrors.unauthorized("invalid webhook timestamp");
     }
 
     const ageSeconds = Math.abs(Math.floor(Date.now() / 1000) - ts);
     if (ageSeconds > 300) {
       webhookSignatureInvalidTotal.inc({ provider });
+      paymentsWebhookTotal.inc({ provider, outcome: "invalid" });
       throw app.httpErrors.unauthorized("stale webhook timestamp");
     }
 
@@ -1004,11 +1012,13 @@ app.post("/webhooks/payments/:provider", async (req: any) => {
 
     if (!valid) {
       webhookSignatureInvalidTotal.inc({ provider });
+      paymentsWebhookTotal.inc({ provider, outcome: "invalid" });
       throw app.httpErrors.unauthorized("invalid webhook signature");
     }
   }
 
   if (!externalEventId) {
+    paymentsWebhookTotal.inc({ provider, outcome: "invalid" });
     throw app.httpErrors.badRequest("externalEventId requerido");
   }
 
@@ -1027,7 +1037,9 @@ app.post("/webhooks/payments/:provider", async (req: any) => {
 
   if (!providerEvent.isNew) {
     webhookReplaysTotal.inc({ provider });
-    req.log.info({ correlationId: req.correlationId, provider, externalEventId }, "payments webhook deduped");
+    paymentsIdempotencyDedupTotal.inc({ provider });
+    paymentsWebhookTotal.inc({ provider, outcome: "deduped" });
+    req.log.info({ correlationId: req.correlationId, provider, providerEventId: externalEventId, outcome: "deduped" }, "payments webhook deduped");
     return { ok: true, deduped: true };
   }
 
@@ -1052,6 +1064,7 @@ app.post("/webhooks/payments/:provider", async (req: any) => {
 
     if (!orderId) {
       await markProviderEventProcessed(provider, externalEventId);
+      paymentsWebhookTotal.inc({ provider, outcome: "processed" });
       return { ok: true, recorded: true, matched: false };
     }
 
@@ -1068,6 +1081,7 @@ app.post("/webhooks/payments/:provider", async (req: any) => {
 
     if (!order) {
       await markProviderEventProcessed(provider, externalEventId);
+      paymentsWebhookTotal.inc({ provider, outcome: "processed" });
       return { ok: true, recorded: true, matched: false };
     }
 
@@ -1085,6 +1099,8 @@ app.post("/webhooks/payments/:provider", async (req: any) => {
         idempotencyKey: externalEventId,
         correlationId: req.correlationId
       });
+      paymentsPaidTransitionTotal.inc({ result: paidTransition.result });
+      req.log.info({ correlationId: req.correlationId, provider, providerEventId: externalEventId, orderId: order.id, outcome: paidTransition.reason }, "payments paid transition evaluated");
     }
 
     if (paidSignal && reservationExpired && inventoryReleased) {
@@ -1172,6 +1188,7 @@ app.post("/webhooks/payments/:provider", async (req: any) => {
       latePaymentCasesTotal.inc({ provider, reason: "inventory_released_after_expire" });
       await syncLatePaymentPendingGauge(provider);
       await markProviderEventProcessed(provider, externalEventId, order.id);
+      paymentsWebhookTotal.inc({ provider, outcome: "processed" });
 
       return {
         ok: true,
@@ -1183,8 +1200,11 @@ app.post("/webhooks/payments/:provider", async (req: any) => {
     }
 
     await markProviderEventProcessed(provider, externalEventId, order.id);
+    paymentsWebhookTotal.inc({ provider, outcome: "processed" });
     return { ok: true, recorded: true, matched: true, paidTransition: paidTransition?.reason ?? null };
   } catch (error) {
+    paymentsWebhookTotal.inc({ provider, outcome: "error" });
+    req.log.error({ correlationId: req.correlationId, provider, providerEventId: externalEventId, err: error }, "payments webhook processing failed");
     await markProviderEventError(provider, externalEventId, error instanceof Error ? error.message : String(error));
     throw error;
   }
