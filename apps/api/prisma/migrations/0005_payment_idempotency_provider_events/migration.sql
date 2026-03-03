@@ -21,7 +21,7 @@ CREATE TABLE "PaymentIdempotencyKey" (
   "id" TEXT NOT NULL,
   "provider" TEXT NOT NULL,
   "idempotencyKey" TEXT NOT NULL,
-  "orderId" TEXT,
+  "orderId" UUID,
   "status" "PaymentIdempotencyStatus" NOT NULL DEFAULT 'in_progress',
   "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "completedAt" TIMESTAMP(3),

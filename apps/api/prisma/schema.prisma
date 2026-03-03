@@ -320,7 +320,7 @@ model PaymentIdempotencyKey {
   id             String                   @id @default(uuid())
   provider       String
   idempotencyKey String
-  orderId        String?
+  orderId        String?                  @db.Uuid
   status         PaymentIdempotencyStatus @default(in_progress)
   createdAt      DateTime                 @default(now())
   completedAt    DateTime?
