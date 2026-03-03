@@ -1,9 +1,9 @@
 import { execSync } from 'node:child_process';
 
 try {
-  execSync('pnpm -r --if-present --filter=!articket-platform test', {
+  execSync('pnpm -r --if-present --filter=!articket-platform test --reporter=default', {
     stdio: 'inherit'
   });
 } catch {
-  process.exit(1);
+  process.exitCode = 1;
 }
