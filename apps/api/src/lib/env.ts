@@ -10,6 +10,13 @@ function requireSecret(name: string, value: string | undefined, minLength = 24):
   return value;
 }
 
+const nodeEnv = process.env.NODE_ENV ?? "development";
+const paymentsWebhookSecret = process.env.PAYMENTS_WEBHOOK_SECRET ?? "";
+
+if (nodeEnv === "production" && !paymentsWebhookSecret) {
+  throw new Error("PAYMENTS_WEBHOOK_SECRET is required in production");
+}
+
 export const env = {
   apiPort: Number(process.env.API_PORT ?? 3000),
   workerMetricsPort: Number(process.env.WORKER_METRICS_PORT ?? 9101),
@@ -22,4 +29,6 @@ export const env = {
   sendgridApiKey: process.env.SENDGRID_API_KEY ?? "",
   sendgridFromEmail: process.env.SENDGRID_FROM_EMAIL ?? "noreply@articket.local",
   sendgridTemplateOrderPaid: process.env.SENDGRID_TEMPLATE_ORDER_PAID ?? "",
+  paymentsWebhookSecret,
+  nodeEnv
 };

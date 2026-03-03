@@ -29,6 +29,14 @@ enum OrderStatus {
   refunded
 }
 
+enum LatePaymentCaseStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  REFUND_REQUESTED
+  REFUNDED
+}
+
 enum TicketStatus {
   issued
   void
@@ -43,6 +51,12 @@ enum DomainEventType {
   ORDER_CONFIRMATION_EMAIL_SENT
   ORDER_EXPIRED
   INVENTORY_RESERVATION_RELEASED
+  RESERVATION_EXPIRED
+  INVENTORY_RELEASED
+  LATE_PAYMENT_DETECTED
+  LATE_PAYMENT_CASE_CREATED
+  LATE_PAYMENT_CASE_RESOLVED
+  MANUAL_OVERRIDE_EXECUTED
 }
 
 enum DomainActorType {
@@ -58,6 +72,21 @@ enum DomainAggregateType {
   inventory_reservation
   event
   notification
+}
+
+enum PaymentProviderEventStatus {
+  received
+  processing
+  processed
+  deduped
+  invalid
+  error
+}
+
+enum PaymentIdempotencyStatus {
+  in_progress
+  completed
+  failed
 }
 
 model User {
@@ -143,29 +172,33 @@ model TicketType {
 }
 
 model Order {
-  id            String                 @id @default(uuid())
-  organizerId   String
-  eventId       String
-  userId        String?
-  orderNumber   String                 @unique
-  customerEmail String
-  status        OrderStatus            @default(pending)
-  subtotalCents Int                    @default(0)
-  feeCents      Int                    @default(0)
-  taxCents      Int                    @default(0)
-  totalCents    Int                    @default(0)
-  reservedUntil DateTime?
-  createdAt     DateTime               @default(now())
-  updatedAt     DateTime               @updatedAt
-  organizer     Organizer              @relation(fields: [organizerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  event         Event                  @relation(fields: [eventId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  user          User?                  @relation(fields: [userId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-  items         OrderItem[]
-  tickets       Ticket[]
-  payments      Payment[]
-  reservations  InventoryReservation[]
-  emailEvents   EmailEvent[]
-  confirmationEmailSentAt DateTime?
+  id                         String                 @id @default(uuid())
+  organizerId                String
+  eventId                    String
+  userId                     String?
+  orderNumber                String                 @unique
+  customerEmail              String
+  status                     OrderStatus            @default(pending)
+  subtotalCents              Int                    @default(0)
+  feeCents                   Int                    @default(0)
+  taxCents                   Int                    @default(0)
+  totalCents                 Int                    @default(0)
+  reservedUntil              DateTime?
+  createdAt                  DateTime               @default(now())
+  updatedAt                  DateTime               @updatedAt
+  organizer                  Organizer              @relation(fields: [organizerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  event                      Event                  @relation(fields: [eventId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  user                       User?                  @relation(fields: [userId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  items                      OrderItem[]
+  tickets                    Ticket[]
+  payments                   Payment[]
+  reservations               InventoryReservation[]
+  emailEvents                EmailEvent[]
+  latePaymentCases           LatePaymentCase[]
+  paymentProviderEvents      PaymentProviderEvent[]
+  paymentIdempotencyKeys     PaymentIdempotencyKey[]
+  latePaymentReviewRequired  Boolean                @default(false)
+  confirmationEmailSentAt    DateTime?
   confirmationEmailMessageId String?
 
   @@index([organizerId, status, createdAt])
@@ -187,19 +220,19 @@ model OrderItem {
 }
 
 model Ticket {
-  id          String       @id @default(uuid())
-  orderId     String
+  id           String       @id @default(uuid())
+  orderId      String
   ticketTypeId String
-  eventId     String
-  status      TicketStatus @default(issued)
-  code        String       @unique
-  qrPayload   String
-  issuedAt    DateTime     @default(now())
-  checkedInAt DateTime?
-  checkedInBy String?
-  order       Order        @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  ticketType  TicketType   @relation(fields: [ticketTypeId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  scans       TicketScan[]
+  eventId      String
+  status       TicketStatus @default(issued)
+  code         String       @unique
+  qrPayload    String
+  issuedAt     DateTime     @default(now())
+  checkedInAt  DateTime?
+  checkedInBy  String?
+  order        Order        @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  ticketType   TicketType   @relation(fields: [ticketTypeId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  scans        TicketScan[]
 
   @@index([orderId])
   @@index([eventId, status])
@@ -238,42 +271,111 @@ model InventoryReservation {
 }
 
 model Payment {
-  id         String   @id @default(uuid())
-  orderId    String
-  provider   String
-  providerRef String
-  status     String
-  amountCents Int
-  createdAt  DateTime @default(now())
-  order      Order    @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  id               String            @id @default(uuid())
+  orderId          String
+  provider         String
+  providerRef      String
+  status           String
+  amountCents      Int
+  createdAt        DateTime          @default(now())
+  order            Order             @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  latePaymentCases LatePaymentCase[]
 
   @@unique([provider, providerRef])
   @@index([orderId, createdAt])
 }
 
+model ProcessedWebhookEvent {
+  id              String   @id @default(uuid())
+  provider        String
+  externalEventId String
+  processedAt     DateTime @default(now())
 
-model EmailEvent {
-  id           String   @id @default(uuid())
-  orderId      String?
-  provider     String
-  eventType    String
-  sgEventId    String?
-  messageId    String?
-  recipient    String?
-  payload      Json
-  createdAt    DateTime @default(now())
-  order        Order?   @relation(fields: [orderId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-
-  @@index([orderId, createdAt])
-  @@index([provider, eventType, createdAt])
-  @@unique([provider, sgEventId])
+  @@unique([provider, externalEventId])
+  @@index([processedAt])
 }
 
+model PaymentProviderEvent {
+  id              String                     @id @default(uuid())
+  provider        String
+  providerEventId String
+  orderId         String?                    @db.Uuid
+  payloadHash     String
+  status          PaymentProviderEventStatus @default(received)
+  attempts        Int                        @default(0)
+  leaseUntil      DateTime?
+  lastAttemptAt   DateTime?
+  receivedAt      DateTime                   @default(now())
+  processedAt     DateTime?
+  errorMessage    String?
+  order           Order?                     @relation(fields: [orderId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@unique([provider, providerEventId])
+  @@index([status, leaseUntil])
+  @@index([status, receivedAt])
+  @@index([orderId, receivedAt])
+}
+
+model PaymentIdempotencyKey {
+  id             String                   @id @default(uuid())
+  provider       String
+  idempotencyKey String
+  orderId        String?                  @db.Uuid
+  status         PaymentIdempotencyStatus @default(in_progress)
+  createdAt      DateTime                 @default(now())
+  completedAt    DateTime?
+  order          Order?                   @relation(fields: [orderId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@unique([provider, idempotencyKey])
+  @@index([status, createdAt])
+  @@index([orderId, createdAt])
+}
+
+model LatePaymentCase {
+  id                String                @id @default(uuid())
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+  version           Int                   @default(0)
+  orderId           String
+  reserveId         String?
+  provider          String
+  providerPaymentId String?
+  paymentAttemptId  String?
+  inventoryReleased Boolean               @default(false)
+  status            LatePaymentCaseStatus @default(PENDING)
+  detectedAt        DateTime              @default(now())
+  resolutionNotes   String?
+  resolvedAt        DateTime?
+  resolvedBy        String?
+  order             Order                 @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  paymentAttempt    Payment?              @relation(fields: [paymentAttemptId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@unique([provider, providerPaymentId])
+  @@unique([orderId, paymentAttemptId])
+  @@index([orderId])
+}
+
+model EmailEvent {
+  id        String   @id @default(uuid())
+  orderId   String?
+  provider  String
+  eventType String
+  sgEventId String?
+  messageId String?
+  recipient String?
+  payload   Json
+  createdAt DateTime @default(now())
+  order     Order?   @relation(fields: [orderId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@unique([provider, sgEventId])
+  @@index([orderId, createdAt])
+  @@index([provider, eventType, createdAt])
+}
 
 model DomainEvent {
-  id            String            @id @default(uuid())
+  id            String              @id @default(uuid())
   type          DomainEventType
-  version       Int               @default(1)
+  version       Int                 @default(1)
   correlationId String?
   actorType     DomainActorType
   actorId       String?
@@ -285,7 +387,7 @@ model DomainEvent {
   organizerId   String?
   context       Json
   payload       Json
-  occurredAt    DateTime          @default(now())
+  occurredAt    DateTime            @default(now())
 
   @@index([eventId, occurredAt])
   @@index([organizerId, occurredAt])

@@ -1,4 +1,4 @@
-import { Prisma, PrismaClient } from "@prisma/client";
+import { Prisma, PrismaClient, type OrganizerRole } from "@prisma/client";
 
 type CursorData = { occurredAt: string; id: string };
 
