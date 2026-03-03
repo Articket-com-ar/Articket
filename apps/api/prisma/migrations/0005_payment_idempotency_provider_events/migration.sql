@@ -1,4 +1,4 @@
-CREATE TYPE "PaymentProviderEventStatus" AS ENUM ('received', 'processed', 'deduped', 'invalid', 'error');
+CREATE TYPE "PaymentProviderEventStatus" AS ENUM ('received', 'processing', 'processed', 'deduped', 'invalid', 'error');
 CREATE TYPE "PaymentIdempotencyStatus" AS ENUM ('in_progress', 'completed', 'failed');
 
 CREATE TABLE "PaymentProviderEvent" (
@@ -8,6 +8,9 @@ CREATE TABLE "PaymentProviderEvent" (
   "orderId" TEXT,
   "payloadHash" TEXT NOT NULL,
   "status" "PaymentProviderEventStatus" NOT NULL DEFAULT 'received',
+  "attempts" INTEGER NOT NULL DEFAULT 0,
+  "leaseUntil" TIMESTAMP(3),
+  "lastAttemptAt" TIMESTAMP(3),
   "receivedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "processedAt" TIMESTAMP(3),
   "errorMessage" TEXT,
@@ -26,6 +29,7 @@ CREATE TABLE "PaymentIdempotencyKey" (
 );
 
 CREATE UNIQUE INDEX "PaymentProviderEvent_provider_providerEventId_key" ON "PaymentProviderEvent"("provider", "providerEventId");
+CREATE INDEX "PaymentProviderEvent_status_leaseUntil_idx" ON "PaymentProviderEvent"("status", "leaseUntil");
 CREATE INDEX "PaymentProviderEvent_status_receivedAt_idx" ON "PaymentProviderEvent"("status", "receivedAt");
 CREATE INDEX "PaymentProviderEvent_orderId_receivedAt_idx" ON "PaymentProviderEvent"("orderId", "receivedAt");
 

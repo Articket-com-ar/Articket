@@ -11,7 +11,8 @@ describe("payments webhook idempotency contract", () => {
 
     expect(moduleContent).toContain("providerEventId");
     expect(moduleContent).toContain("error.code === \"P2002\"");
-    expect(moduleContent).toContain("return { isNew: false }");
+    expect(moduleContent).toContain("if (existing.status === \"processed\")");
+    expect(moduleContent).toContain("return { state: \"deduped\" }");
   });
 
   it("treats replayed webhook events as no-op", () => {
@@ -19,6 +20,22 @@ describe("payments webhook idempotency contract", () => {
 
     expect(server).toContain("payments webhook deduped");
     expect(server).toContain("return { ok: true, deduped: true }");
+  });
+
+  it("retries events previously marked as error", () => {
+    const moduleContent = read("apps/api/src/modules/payments/webhook-idempotency.ts");
+
+    expect(moduleContent).toContain("{ status: \"error\" }");
+    expect(moduleContent).toContain("return { state: \"claimed\", mode: \"retry\" }");
+  });
+
+  it("returns inFlight when processing lease is still active", () => {
+    const moduleContent = read("apps/api/src/modules/payments/webhook-idempotency.ts");
+    const server = read("apps/api/src/server.ts");
+
+    expect(moduleContent).toContain("existing.status === \"processing\"");
+    expect(moduleContent).toContain("return { state: \"in_flight\" }");
+    expect(server).toContain("reply.code(202).send({ ok: true, inFlight: true })");
   });
 
   it("uses transactional guard to prevent concurrent double paid transition", () => {

@@ -24,7 +24,7 @@ import {
   webhookReplaysTotal,
   webhookSignatureInvalidTotal
 } from "./observability/metrics.js";
-import { markProviderEventError, markProviderEventProcessed, registerProviderEvent } from "./modules/payments/webhook-idempotency.js";
+import { claimProviderEvent, markProviderEventError, markProviderEventProcessed } from "./modules/payments/webhook-idempotency.js";
 import { assertWebhookRateLimitShared } from "./modules/payments/webhook-rate-limit.js";
 import { ACTIVITY_EVENT_TYPES, type ActivityEventType, fetchEventActivity } from "./modules/activity/service.js";
 import { registerDashboardRoutes } from "./modules/events/dashboard/dashboard.routes.js";
@@ -930,7 +930,7 @@ app.post("/late-payment-cases/:id/resolve", { preHandler: verifyAuth }, async (r
   return updated;
 });
 
-app.post("/webhooks/payments/:provider", async (req: any) => {
+app.post("/webhooks/payments/:provider", async (req: any, reply: any) => {
   const params = z.object({ provider: z.string().min(1) }).parse(req.params);
   const body = z
     .object({
@@ -1028,19 +1028,29 @@ app.post("/webhooks/payments/:provider", async (req: any) => {
     .update(req.rawBody ? req.rawBody.toString("utf8") : JSON.stringify(body))
     .digest("hex");
 
-  const providerEvent = await registerProviderEvent({
+  const providerEvent = await claimProviderEvent({
     provider,
     providerEventId: externalEventId,
     payloadHash,
     orderId: body.orderId
   });
 
-  if (!providerEvent.isNew) {
+  if (providerEvent.state === "deduped") {
     webhookReplaysTotal.inc({ provider });
     paymentsIdempotencyDedupTotal.inc({ provider });
     paymentsWebhookTotal.inc({ provider, outcome: "deduped" });
     req.log.info({ correlationId: req.correlationId, provider, providerEventId: externalEventId, outcome: "deduped" }, "payments webhook deduped");
     return { ok: true, deduped: true };
+  }
+
+  if (providerEvent.state === "in_flight") {
+    paymentsWebhookTotal.inc({ provider, outcome: "in_flight" });
+    req.log.info({ correlationId: req.correlationId, provider, providerEventId: externalEventId, outcome: "in_flight" }, "payments webhook in-flight");
+    return reply.code(202).send({ ok: true, inFlight: true });
+  }
+
+  if (providerEvent.mode === "retry") {
+    paymentsWebhookTotal.inc({ provider, outcome: "retry" });
   }
 
   try {

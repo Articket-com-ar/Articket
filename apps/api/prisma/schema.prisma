@@ -76,6 +76,7 @@ enum DomainAggregateType {
 
 enum PaymentProviderEventStatus {
   received
+  processing
   processed
   deduped
   invalid
@@ -301,12 +302,16 @@ model PaymentProviderEvent {
   orderId         String?
   payloadHash     String
   status          PaymentProviderEventStatus @default(received)
+  attempts        Int                        @default(0)
+  leaseUntil      DateTime?
+  lastAttemptAt   DateTime?
   receivedAt      DateTime                   @default(now())
   processedAt     DateTime?
   errorMessage    String?
   order           Order?                     @relation(fields: [orderId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   @@unique([provider, providerEventId])
+  @@index([status, leaseUntil])
   @@index([status, receivedAt])
   @@index([orderId, receivedAt])
 }
