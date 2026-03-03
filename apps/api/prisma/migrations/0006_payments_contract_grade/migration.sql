@@ -1,5 +1,6 @@
 ALTER TYPE "DomainEventType" ADD VALUE IF NOT EXISTS 'PAYMENT_RECONCILED_PAID';
 ALTER TYPE "DomainEventType" ADD VALUE IF NOT EXISTS 'PAYMENT_RECONCILED_FAILED';
+ALTER TYPE "DomainEventType" ADD VALUE IF NOT EXISTS 'PAYMENT_WEBHOOK_DUPLICATE_IGNORED';
 
 CREATE TABLE "PaymentAttempt" (
   "id" UUID NOT NULL DEFAULT gen_random_uuid(),
@@ -33,6 +34,7 @@ CREATE TABLE "WebhookReceipt" (
   "providerPaymentId" TEXT,
   "orderId" UUID,
   "payloadHash" TEXT NOT NULL,
+  "dedupeKey" TEXT NOT NULL,
   "signatureValid" BOOLEAN NOT NULL DEFAULT false,
   "rawPayload" JSONB NOT NULL,
   "receivedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -41,6 +43,7 @@ CREATE TABLE "WebhookReceipt" (
 );
 
 CREATE UNIQUE INDEX "WebhookReceipt_provider_providerEventId_key" ON "WebhookReceipt"("provider", "providerEventId");
+CREATE UNIQUE INDEX "WebhookReceipt_provider_dedupeKey_key" ON "WebhookReceipt"("provider", "dedupeKey");
 CREATE INDEX "WebhookReceipt_provider_providerPaymentId_receivedAt_idx" ON "WebhookReceipt"("provider", "providerPaymentId", "receivedAt");
 CREATE INDEX "WebhookReceipt_orderId_receivedAt_idx" ON "WebhookReceipt"("orderId", "receivedAt");
 
@@ -48,3 +51,13 @@ ALTER TABLE "WebhookReceipt"
   ADD CONSTRAINT "WebhookReceipt_orderId_fkey"
   FOREIGN KEY ("orderId") REFERENCES "Order"("id")
   ON DELETE SET NULL ON UPDATE CASCADE;
+
+CREATE UNIQUE INDEX "Ticket_orderId_code_key" ON "Ticket"("orderId", "code");
+
+CREATE UNIQUE INDEX "DomainEvent_order_paid_once_key"
+  ON "DomainEvent"("aggregateId", "type")
+  WHERE "type" = 'ORDER_PAID';
+
+CREATE UNIQUE INDEX "DomainEvent_tickets_issued_once_key"
+  ON "DomainEvent"("aggregateId", "type")
+  WHERE "type" = 'TICKETS_ISSUED';

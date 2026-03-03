@@ -865,6 +865,10 @@ app.post("/webhooks/mercadopago", async (req: any, reply: any) => {
     .update(req.rawBody ? req.rawBody.toString("utf8") : JSON.stringify(body))
     .digest("hex");
 
+  const dedupeKey = createHash("sha256")
+    .update(`${providerEventId}|${payloadHash}|${typeof signature === "string" ? signature : "no-signature"}`)
+    .digest("hex");
+
   const providerPaymentId = String(body.providerPaymentId ?? body.data?.id ?? body.id ?? "").trim() || null;
 
   let receipt;
@@ -875,6 +879,7 @@ app.post("/webhooks/mercadopago", async (req: any, reply: any) => {
         providerEventId,
         providerPaymentId,
         payloadHash,
+        dedupeKey,
         signatureValid,
         rawPayload: body as any,
         correlationId: req.correlationId

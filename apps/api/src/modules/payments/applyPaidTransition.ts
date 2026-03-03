@@ -39,6 +39,19 @@ export async function applyOrderPaidTransition(params: {
     });
 
     if (order.status === "paid") {
+      await emitDomainEvent({
+        type: DomainEventName.PAYMENT_WEBHOOK_DUPLICATE_IGNORED,
+        correlationId: params.correlationId,
+        actorType: params.actorType ?? "webhook",
+        aggregateType: "order",
+        aggregateId: order.id,
+        organizerId: order.organizerId,
+        eventId: order.eventId,
+        orderId: order.id,
+        context: { source: params.source, provider: params.provider },
+        payload: { providerRef: params.providerRef }
+      }, tx);
+
       await tx.paymentIdempotencyKey.update({
         where: { provider_idempotencyKey: { provider: params.provider, idempotencyKey: params.idempotencyKey } },
         data: { status: "completed", completedAt: new Date() }

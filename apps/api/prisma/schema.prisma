@@ -58,6 +58,7 @@ enum DomainEventType {
   LATE_PAYMENT_CASE_RESOLVED
   PAYMENT_RECONCILED_PAID
   PAYMENT_RECONCILED_FAILED
+  PAYMENT_WEBHOOK_DUPLICATE_IGNORED
   MANUAL_OVERRIDE_EXECUTED
 }
 
@@ -238,6 +239,7 @@ model Ticket {
   ticketType   TicketType   @relation(fields: [ticketTypeId], references: [id], onDelete: Restrict, onUpdate: Cascade)
   scans        TicketScan[]
 
+  @@unique([orderId, code])
   @@index([orderId])
   @@index([eventId, status])
 }
@@ -316,6 +318,7 @@ model WebhookReceipt {
   providerPaymentId String?
   orderId           String?  @db.Uuid
   payloadHash       String
+  dedupeKey         String
   signatureValid    Boolean  @default(false)
   rawPayload        Json
   receivedAt        DateTime @default(now())
@@ -323,6 +326,7 @@ model WebhookReceipt {
   order             Order?   @relation(fields: [orderId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   @@unique([provider, providerEventId])
+  @@unique([provider, dedupeKey])
   @@index([provider, providerPaymentId, receivedAt])
   @@index([orderId, receivedAt])
 }
