@@ -937,9 +937,15 @@ app.post<{ Params: { provider: string } }>("/webhooks/payments/:provider", async
 
   const provider = params.provider.toLowerCase();
   const providerEventId =
-    (typeof body.id === "string" || typeof body.id === "number") ? String(body.id) :
-      (typeof body.event_id === "string" || typeof body.event_id === "number") ? String(body.event_id) :
-        null;
+    (typeof body.id === "string" || typeof body.id === "number")
+      ? String(body.id)
+      : (typeof body.event_id === "string" || typeof body.event_id === "number")
+        ? String(body.event_id)
+        : (typeof body.externalEventId === "string" || typeof body.externalEventId === "number")
+          ? String(body.externalEventId)
+          : (typeof body.eventId === "string" || typeof body.eventId === "number")
+            ? String(body.eventId)
+            : null;
 
   if (!providerEventId) {
     paymentWebhookRejectedTotal.inc({ provider, reason: "missing_event_id" });
@@ -1006,7 +1012,7 @@ app.post<{ Params: { provider: string } }>("/webhooks/payments/:provider", async
         orderId: parsedOrderId,
         eventType,
         outcome: "deduped"
-      }, "payment webhook deduped");
+      }, "payments webhook deduped");
       return { ok: true, deduped: true };
     }
 
