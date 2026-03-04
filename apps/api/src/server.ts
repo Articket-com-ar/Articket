@@ -1,4 +1,4 @@
-﻿import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import cors from "@fastify/cors";
 import jwt from "@fastify/jwt";
@@ -93,7 +93,6 @@ app.addContentTypeParser("application/json", { parseAs: "buffer" }, (req, body, 
 
 app.decorateRequest("correlationId", "");
 app.decorateRequest("metricsStartAt", 0n);
-app.decorateRequest("rawBody", undefined);
 
 app.addHook("onRequest", async (req, reply) => {
   const incomingCorrelation = req.headers["x-correlation-id"];
@@ -773,7 +772,7 @@ app.post("/checkin/scan", { preHandler: verifyAuth }, async (req: any) => {
 });
 
 
-app.post("/orders/:id/resend-confirmation", { preHandler: verifyAuth }, async (req: any) => {
+app.post<{ Params: { id: string } }>("/orders/:id/resend-confirmation", { preHandler: verifyAuth }, async (req) => {
   const user = req.user as JwtPayload;
   const correlationId = req.correlationId;
   const order = await prisma.order.findUniqueOrThrow({ where: { id: req.params.id }, include: { event: true } });
