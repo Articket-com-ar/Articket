@@ -931,9 +931,9 @@ app.post("/late-payment-cases/:id/resolve", { preHandler: verifyAuth }, async (r
   return updated;
 });
 
-app.post("/webhooks/payments/:provider", async (req: any) => {
+app.post<{ Params: { provider: string } }>("/webhooks/payments/:provider", async (req) => {
   const params = z.object({ provider: z.string().min(1) }).parse(req.params);
-  const body = z.record(z.any()).parse(req.body ?? {});
+  const body = (req.body ?? {}) as any;
 
   const provider = params.provider.toLowerCase();
   const providerEventId =
@@ -988,7 +988,12 @@ app.post("/webhooks/payments/:provider", async (req: any) => {
 
     return { ok: true, deduped: false };
   } catch (error: any) {
-    if (error?.code === "P2002") {
+    const uniqueTarget = Array.isArray(error?.meta?.target)
+      ? error.meta.target.map(String).join(",")
+      : String(error?.meta?.target ?? "");
+    const isProviderEventUnique = uniqueTarget.includes("provider") && uniqueTarget.includes("providerEventId");
+
+    if (error?.code === "P2002" && isProviderEventUnique) {
       paymentWebhookDedupedTotal.inc({ provider });
       req.log.info({
         correlationId: req.correlationId,

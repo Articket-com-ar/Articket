@@ -55,6 +55,13 @@ describe.skipIf(!hasDb)("payment webhook store + dedupe", () => {
 
     expect(responses.every((r) => r.status === 200)).toBe(true);
 
+    const responseBodies = await Promise.all(responses.map((r) => r.json()));
+    const dedupedCount = responseBodies.filter((b) => b?.deduped === true).length;
+    const storedCount = responseBodies.filter((b) => b?.deduped === false).length;
+
+    expect(storedCount).toBe(1);
+    expect(dedupedCount).toBe(19);
+
     const rows = await prisma.paymentEvent.findMany({
       where: { provider, providerEventId: eventId }
     });
