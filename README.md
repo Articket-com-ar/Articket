@@ -1,4 +1,4 @@
-# Articket Platform
+#  Platform
 
 ## Demo-rich seed verification (dev)
 
