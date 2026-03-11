@@ -4,6 +4,7 @@ import { prisma } from "../../lib/prisma.js";
 import { emitDomainEvent } from "../../lib/domainEvents.js";
 import { DomainEventName } from "../../domain/events.js";
 import { generateTicketCode } from "../../lib/qr.js";
+import { materializePayment } from "./materializePayment.js";
 
 type ApplyResult = { ok: true; outcome: string };
 
@@ -75,6 +76,26 @@ export async function applyPaymentEvent(paymentEventId: string, correlationId: s
     }
 
     if (target === "paid") {
+      if (!paymentEvent.providerPaymentId) {
+        const identityError: Error & { statusCode?: number; code?: string } = new Error("providerPaymentId required for paid webhook");
+        identityError.statusCode = 422;
+        identityError.code = "MISSING_PAYMENT_IDENTITY";
+        throw identityError;
+      }
+
+      const paymentResult = await materializePayment(tx, {
+        orderId: order.id,
+        provider: paymentEvent.provider,
+        providerRef: paymentEvent.providerPaymentId,
+        amountCents: order.totalCents,
+        status: "paid"
+      });
+
+      if (paymentResult.state === "existing" && terminalStatuses.has(order.status)) {
+        await markEventProcessed(tx, paymentEvent.id, { ignoredReason: "terminal_guard" });
+        return { ok: true, outcome: "terminal_guard" };
+      }
+
       const reservationExpired = !!order.reservedUntil && order.reservedUntil < new Date();
 
       if (reservationExpired) {

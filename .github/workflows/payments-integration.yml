@@ -74,3 +74,9 @@ jobs:
 
       - name: run checkout confirm idempotency integration test
         run: pnpm --filter @articket/api test -- src/modules/payments/checkoutConfirmIdempotency.integration.test.ts
+
+      - name: run payment convergence integration test
+        run: pnpm --filter @articket/api test -- src/modules/payments/paymentConvergence.integration.test.ts
+
+      - name: run webhook concurrency integration test
+        run: pnpm --filter @articket/api test -- src/modules/payments/webhookConcurrency.test.ts

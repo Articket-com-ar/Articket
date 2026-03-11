@@ -29,6 +29,7 @@ import {
 import { ACTIVITY_EVENT_TYPES, type ActivityEventType, fetchEventActivity } from "./modules/activity/service.js";
 import { registerDashboardRoutes } from "./modules/events/dashboard/dashboard.routes.js";
 import { applyPaymentEvent } from "./modules/payments/applyPaymentEvent.js";
+import { materializePayment } from "./modules/payments/materializePayment.js";
 
 const app = Fastify({ logger: true });
 
@@ -491,29 +492,6 @@ app.post("/checkout/confirm", async (req: any) => {
     const order = await prisma.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM "Order" WHERE id = CAST(${body.orderId} AS uuid) FOR UPDATE`;
 
-      const duplicatePayment = await tx.payment.findUnique({
-        where: { provider_providerRef: { provider: "mock", providerRef: body.paymentReference } }
-      });
-      if (duplicatePayment) {
-        if (duplicatePayment.orderId !== body.orderId) {
-          const conflictError: Error & { statusCode?: number; code?: string } = new Error("Payment reference already used");
-          conflictError.statusCode = 409;
-          conflictError.code = "PAYMENT_REFERENCE_ALREADY_USED";
-          throw conflictError;
-        }
-        // Payment already exists for this order: safe to return existing state.
-        // Still persist idempotency key so future retries hit the fast path.
-        try {
-          await tx.confirmIdempotencyKey.create({
-            data: { clientRequestId: body.clientRequestId, orderId: body.orderId, paymentReference: body.paymentReference }
-          });
-        } catch (e: any) {
-          if (e?.code !== "P2002") throw e;
-          // Race: another concurrent request persisted the key first. No-op.
-        }
-        return tx.order.findUnique({ where: { id: duplicatePayment.orderId }, include: { tickets: true } });
-      }
-
       const order = await tx.order.findUnique({ where: { id: body.orderId }, include: { items: true } });
       if (!order) throw new Error("Orden inválida");
 
@@ -555,15 +533,24 @@ app.post("/checkout/confirm", async (req: any) => {
       if (order.status !== "reserved") throw new Error("Estado de orden inválido");
       if (!order.reservedUntil || order.reservedUntil < new Date()) throw new Error("Reserva expirada");
 
-      await tx.payment.create({
-        data: {
-          orderId: order.id,
-          provider: "mock",
-          providerRef: body.paymentReference,
-          status: "paid",
-          amountCents: order.totalCents
-        }
+      const materializedPayment = await materializePayment(tx, {
+        orderId: order.id,
+        provider: "mock",
+        providerRef: body.paymentReference,
+        amountCents: order.totalCents,
+        status: "paid"
       });
+
+      if (materializedPayment.state === "existing") {
+        try {
+          await tx.confirmIdempotencyKey.create({
+            data: { clientRequestId: body.clientRequestId, orderId: order.id, paymentReference: body.paymentReference }
+          });
+        } catch (e: any) {
+          if (e?.code !== "P2002") throw e;
+        }
+        return tx.order.findUnique({ where: { id: order.id }, include: { tickets: true } });
+      }
 
       await tx.order.update({ where: { id: order.id }, data: { status: "paid" } });
 
@@ -1042,6 +1029,20 @@ app.post<{ Params: { provider: string } }>("/webhooks/payments/:provider", async
         }
       });
       req.log.error({ correlationId: req.correlationId, provider, providerEventId, err: applyError }, "payment event process error");
+
+      if (applyError?.code === "MISSING_PAYMENT_IDENTITY") {
+        paymentWebhookRejectedTotal.inc({ provider, reason: "missing_payment_identity" });
+        const error = app.httpErrors.unprocessableEntity("providerPaymentId requerido para paid webhook");
+        (error as any).code = "MISSING_PAYMENT_IDENTITY";
+        throw error;
+      }
+
+      if (applyError?.code === "PAYMENT_REFERENCE_ALREADY_USED") {
+        paymentWebhookRejectedTotal.inc({ provider, reason: "payment_reference_conflict" });
+        const error = app.httpErrors.conflict("Payment reference already used");
+        (error as any).code = "PAYMENT_REFERENCE_ALREADY_USED";
+        throw error;
+      }
     }
 
     return { ok: true, deduped: false };
@@ -1055,6 +1056,18 @@ app.post<{ Params: { provider: string } }>("/webhooks/payments/:provider", async
       (targetNorm.includes("providereventid") || targetNorm.includes("provider_event_id") || targetNorm.includes("payment_events_provider_providereventid_key"));
 
     if (error?.code === "P2002" && isProviderEventUnique) {
+      const existing = await prisma.paymentEvent.findUnique({
+        where: { provider_providerEventId: { provider, providerEventId } },
+        select: { processedAt: true, processError: true }
+      });
+
+      if (existing && !existing.processedAt && existing.processError?.includes("providerPaymentId required for paid webhook")) {
+        paymentWebhookRejectedTotal.inc({ provider, reason: "missing_payment_identity" });
+        const unresolvedError = app.httpErrors.unprocessableEntity("providerPaymentId requerido para paid webhook");
+        (unresolvedError as any).code = "MISSING_PAYMENT_IDENTITY";
+        throw unresolvedError;
+      }
+
       paymentWebhookDedupedTotal.inc({ provider });
       req.log.info({
         correlationId: req.correlationId,
@@ -1067,6 +1080,8 @@ app.post<{ Params: { provider: string } }>("/webhooks/payments/:provider", async
       }, "payments webhook deduped");
       return { ok: true, deduped: true };
     }
+
+    if (error?.statusCode) throw error;
 
     paymentWebhookRejectedTotal.inc({ provider, reason: "persistence_error" });
     throw error;

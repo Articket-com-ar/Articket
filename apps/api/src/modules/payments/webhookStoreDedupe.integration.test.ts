@@ -1,5 +1,6 @@
 import { beforeAll, afterAll, describe, expect, it } from "vitest";
 import { prisma } from "../../lib/prisma.js";
+import { hasIntegrationEnv } from "./integrationTestEnv.js";
 
 if (!process.env.API_PORT) process.env.API_PORT = "3410";
 process.env.JWT_ACCESS_SECRET ||= "test-access-secret-min-24-ch";
@@ -7,7 +8,6 @@ process.env.JWT_REFRESH_SECRET ||= "test-refresh-secret-24-ch";
 process.env.QR_SECRET ||= "test-qr-secret-min-24-ch";
 process.env.NODE_ENV ||= "test";
 
-const hasDb = Boolean(process.env.DATABASE_URL);
 const baseUrl = `http://127.0.0.1:${process.env.API_PORT}`;
 const provider = "test-provider";
 
@@ -22,7 +22,7 @@ async function waitForHealth() {
   throw new Error("server did not become healthy in time");
 }
 
-describe.skipIf(!hasDb)("payment webhook store + dedupe", () => {
+describe.skipIf(!hasIntegrationEnv)("payment webhook store + dedupe", () => {
   beforeAll(async () => {
     await import("../../server.js");
     await waitForHealth();
