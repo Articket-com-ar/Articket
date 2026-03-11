@@ -15,6 +15,10 @@ const tx: any = {
     update: vi.fn(),
     updateMany: vi.fn()
   },
+  payment: {
+    findUnique: vi.fn(),
+    create: vi.fn()
+  },
   orderItem: { aggregate: vi.fn() },
   inventoryReservation: { aggregate: vi.fn(), updateMany: vi.fn() },
   ticketType: { findUniqueOrThrow: vi.fn() },
@@ -33,6 +37,8 @@ vi.mock("../../lib/domainEvents.js", () => ({ emitDomainEvent: emitDomainEventMo
 describe("applyPaymentEvent", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    tx.payment.findUnique.mockResolvedValue(null);
+    tx.payment.create.mockImplementation(async ({ data }: any) => ({ id: `p-${data.providerRef}`, ...data }));
   });
 
   it("returns no-op when event already processed", async () => {
@@ -94,8 +100,63 @@ describe("applyPaymentEvent", () => {
     expect(emitDomainEventMock).toHaveBeenCalled();
   });
 
+  it("rejects paid webhook without provider payment identity and avoids side effects", async () => {
+    tx.paymentEvent.findUnique.mockResolvedValueOnce({ id: "e-missing", processedAt: null, orderId: "o-missing", eventType: "payment.succeeded", provider: "mock", providerPaymentId: null });
+    tx.order.findUnique.mockResolvedValueOnce({
+      id: "o-missing",
+      status: "reserved",
+      organizerId: "org",
+      eventId: "evt",
+      reservedUntil: new Date(Date.now() + 60_000),
+      items: [],
+      reservations: [],
+      tickets: []
+    });
+
+    const { applyPaymentEvent } = await import("./applyPaymentEvent.js");
+
+    await expect(applyPaymentEvent("e-missing", "corr-missing")).rejects.toMatchObject({
+      code: "MISSING_PAYMENT_IDENTITY",
+      statusCode: 422
+    });
+    expect(tx.payment.create).not.toHaveBeenCalled();
+    expect(tx.order.updateMany).not.toHaveBeenCalled();
+    expect(tx.ticket.createMany).not.toHaveBeenCalled();
+  });
+
+  it("materializes canonical payment before applying paid effects", async () => {
+    tx.paymentEvent.findUnique.mockResolvedValueOnce({ id: "e-paid", processedAt: null, orderId: "o-paid", eventType: "payment.succeeded", provider: "mock", providerPaymentId: "provider-pay-1" });
+    tx.order.findUnique.mockResolvedValueOnce({
+      id: "o-paid",
+      status: "reserved",
+      organizerId: "org",
+      eventId: "evt",
+      totalCents: 1500,
+      reservedUntil: new Date(Date.now() + 60_000),
+      items: [],
+      reservations: [],
+      tickets: []
+    });
+    tx.order.updateMany.mockResolvedValueOnce({ count: 1 });
+
+    const { applyPaymentEvent } = await import("./applyPaymentEvent.js");
+    const result = await applyPaymentEvent("e-paid", "corr-paid");
+
+    expect(result.outcome).toBe("paid");
+    expect(tx.payment.create).toHaveBeenCalledWith({
+      data: {
+        orderId: "o-paid",
+        provider: "mock",
+        providerRef: "provider-pay-1",
+        status: "paid",
+        amountCents: 1500
+      }
+    });
+    expect(tx.order.updateMany).toHaveBeenCalled();
+  });
+
   it("sets PAID_NO_STOCK when paid arrives after expiration without stock", async () => {
-    tx.paymentEvent.findUnique.mockResolvedValueOnce({ id: "e5", processedAt: null, orderId: "o5", eventType: "payment.succeeded", provider: "mock" });
+    tx.paymentEvent.findUnique.mockResolvedValueOnce({ id: "e5", processedAt: null, orderId: "o5", eventType: "payment.succeeded", provider: "mock", providerPaymentId: "p5" });
     tx.order.findUnique.mockResolvedValueOnce({
       id: "o5",
       status: "reserved",
