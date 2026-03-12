@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { BrowserRouter, Link, Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { QueryClient, QueryClientProvider, useMutation } from "@tanstack/react-query";
 import { api } from "./api/client";
+import { can } from "./lib/adminAccess";
 import { EventActivityPage } from "./pages/EventActivityPage";
 import { EventDashboardPage } from "./pages/EventDashboardPage";
 import {
@@ -53,7 +54,7 @@ function Login() {
 }
 
 function Dashboard({ role, onRoleChange }: { role: VisualRole; onRoleChange: (role: VisualRole) => void }) {
-  const { activeOrganizer, activeEvent, events, organizers, setActiveEventId, setActiveOrganizerId } = useAdminContext();
+  const { activeOrganizer, activeEvent, events, organizers, authorization, setActiveEventId, setActiveOrganizerId } = useAdminContext();
   const publishedEvents = events.filter((event) => event.visibility === "published");
   const draftEvents = events.filter((event) => event.visibility === "draft");
 
@@ -87,8 +88,8 @@ function Dashboard({ role, onRoleChange }: { role: VisualRole; onRoleChange: (ro
             <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-600">Atajos útiles</h3>
             <div className="mt-3 flex flex-wrap gap-2 text-sm">
               <Link to="/events" className="rounded border border-slate-300 px-3 py-2 hover:bg-slate-100">Ver eventos</Link>
-              {role === "admin" ? <Link to="/events/new" className="rounded border border-slate-300 px-3 py-2 hover:bg-slate-100">Crear evento</Link> : null}
-              <Link to={activeEvent ? `/events/${activeEvent.id}/checkin` : "/checkin"} className="rounded border border-slate-300 px-3 py-2 hover:bg-slate-100">Ir a check-in</Link>
+              {can(authorization, "createEvent") ? <Link to="/events/new" className="rounded border border-slate-300 px-3 py-2 hover:bg-slate-100">Crear evento</Link> : null}
+              {can(authorization, "scanTickets") ? <Link to={activeEvent ? `/events/${activeEvent.id}/checkin` : "/checkin"} className="rounded border border-slate-300 px-3 py-2 hover:bg-slate-100">Ir a check-in</Link> : null}
               <Link to="/buy" className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-amber-900 hover:bg-amber-100">Compra demo fuera del admin</Link>
             </div>
           </Card>
@@ -123,8 +124,8 @@ function Dashboard({ role, onRoleChange }: { role: VisualRole; onRoleChange: (ro
             </div>
             <div className="mt-4 flex flex-wrap gap-2 text-sm">
               <Link to={`/organizers/${activeOrganizer?.slug}/events/${activeEvent.slug}/dashboard`} className="rounded border border-slate-300 px-3 py-2 hover:bg-slate-100">Abrir panel operativo</Link>
-              <Link to={`/events/${activeEvent.id}/checkin`} className="rounded border border-slate-300 px-3 py-2 hover:bg-slate-100">Abrir check-in</Link>
-              <Link to={`/dashboard/events/${activeEvent.id}/activity`} className="rounded border border-slate-300 px-3 py-2 hover:bg-slate-100">Ver actividad técnica</Link>
+              {can(authorization, "scanTickets") ? <Link to={`/events/${activeEvent.id}/checkin`} className="rounded border border-slate-300 px-3 py-2 hover:bg-slate-100">Abrir check-in</Link> : null}
+              {can(authorization, "viewEventActivity") ? <Link to={`/dashboard/events/${activeEvent.id}/activity`} className="rounded border border-slate-300 px-3 py-2 hover:bg-slate-100">Ver actividad técnica</Link> : null}
             </div>
           </Card>
         ) : (
@@ -184,13 +185,13 @@ function Dashboard({ role, onRoleChange }: { role: VisualRole; onRoleChange: (ro
 }
 
 function EventsIndex({ role }: { role: VisualRole }) {
-  const { activeOrganizer, activeEvent, events, setActiveEventId } = useAdminContext();
+  const { activeOrganizer, activeEvent, events, authorization, setActiveEventId } = useAdminContext();
 
   return (
     <PageSection
       title="Eventos"
       description="Entry point serio del dominio. Desde acá se elige evento activo y se separa catálogo del uso operativo diario."
-      actions={role === "admin" ? <Link to="/events/new" className="rounded-md bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-700">Crear evento</Link> : undefined}
+      actions={can(authorization, "createEvent") ? <Link to="/events/new" className="rounded-md bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-700">Crear evento</Link> : undefined}
     >
       <Card>
         <div className="grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-4">
@@ -219,8 +220,8 @@ function EventsIndex({ role }: { role: VisualRole }) {
                   </button>
                 ) : null}
                 <Link to={`/organizers/${activeOrganizer?.slug}/events/${event.slug}/dashboard`} className="rounded border border-slate-300 px-2 py-1 hover:bg-slate-100">Panel operativo</Link>
-                <Link to={`/events/${event.id}/checkin`} className="rounded border border-slate-300 px-2 py-1 hover:bg-slate-100">Check-in</Link>
-                <Link to={`/dashboard/events/${event.id}/activity`} className="rounded border border-slate-300 px-2 py-1 hover:bg-slate-100">Actividad técnica</Link>
+                {can(authorization, "scanTickets") ? <Link to={`/events/${event.id}/checkin`} className="rounded border border-slate-300 px-2 py-1 hover:bg-slate-100">Check-in</Link> : null}
+                {can(authorization, "viewEventActivity") ? <Link to={`/dashboard/events/${event.id}/activity`} className="rounded border border-slate-300 px-2 py-1 hover:bg-slate-100">Actividad técnica</Link> : null}
               </div>
             </Card>
           );
@@ -232,8 +233,13 @@ function EventsIndex({ role }: { role: VisualRole }) {
 }
 
 function CreateEvent() {
-  const { activeOrganizer } = useAdminContext();
+  const { activeOrganizer, authorization } = useAdminContext();
+  const canCreateEvent = can(authorization, "createEvent");
   const create = useMutation({ mutationFn: (payload: any) => api("/events", { method: "POST", body: JSON.stringify(payload) }) });
+
+  if (authorization && !canCreateEvent) {
+    return <Navigate to="/dashboard" replace />;
+  }
 
   return (
     <PageSection title="Nuevo evento" description="Sigue siendo un alta rápida, pero ahora depende del organizer seleccionado explícitamente en el shell.">
@@ -244,7 +250,7 @@ function CreateEvent() {
         </div>
         <Button
           className="mt-4"
-          disabled={!activeOrganizer}
+          disabled={!activeOrganizer || !canCreateEvent}
           onClick={() =>
             create.mutate({
               organizerId: activeOrganizer?.id ?? "",
@@ -283,25 +289,47 @@ function PublicBuy() {
 }
 
 function Checkin() {
-  const { activeOrganizer, activeEvent, events, setActiveEventId } = useAdminContext();
-  const scan = useMutation({ mutationFn: (code: string) => api("/checkin/scan", { method: "POST", body: JSON.stringify({ code }) }) });
+  const { activeOrganizer, activeEvent, events, authorization, setActiveEventId } = useAdminContext();
+  const navigate = useNavigate();
+  const hasValidActiveEvent = Boolean(activeOrganizer && activeEvent && events.some((event) => event.id === activeEvent.id));
+
+  if (hasValidActiveEvent && activeEvent) {
+    return <Navigate to={`/events/${activeEvent.id}/checkin`} replace />;
+  }
 
   return (
-    <PageSection title="Check-in" description="La operación de acceso ya no se presenta como utilidad global muda: depende del evento activo o de una selección explícita.">
-      <Card className="max-w-2xl">
-        <div className="grid gap-3 text-sm sm:grid-cols-2">
-          <p><span className="font-medium">Organización activa:</span> {activeOrganizer?.name ?? "Sin selección"}</p>
+    <PageSection title="Check-in" description="Entrada global recortada. La operación real de acceso queda solo en rutas scopiadas por evento.">
+      <Card className="max-w-4xl">
+        <div className="grid gap-3 text-sm lg:grid-cols-4">
+          <p><span className="font-medium">Organización:</span> {activeOrganizer?.name ?? "Sin selección"}</p>
           <p><span className="font-medium">Evento activo:</span> {activeEvent?.name ?? "Sin selección"}</p>
+          <p><span className="font-medium">Rol efectivo:</span> {authorization?.organizerRole ?? "Sin authz"}</p>
+          <p><span className="font-medium">Capacidad:</span> {can(authorization, "scanTickets") ? "Operativa" : "Sin operación"}</p>
         </div>
 
-        {!activeEvent ? (
+        {!can(authorization, "scanTickets") ? (
           <div className="mt-4 space-y-3">
-            <p className="text-sm text-amber-700">Elegí un evento antes de operar check-in. Esta vista ya no debería sentirse global ni agnóstica al contexto.</p>
+            <p className="text-sm text-amber-700">Este perfil no tiene capacidad operativa de check-in para la organización activa.</p>
+          </div>
+        ) : (
+          <div className="mt-4 space-y-4">
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm">
+              <p className="font-medium text-slate-900">Seleccioná un evento antes de operar check-in.</p>
+              <p className="mt-1 text-slate-600">Desde esta vista global ya no se puede escanear. El ingreso operativo ocurre solo en <code>/events/:eventId/checkin</code>.</p>
+            </div>
+
             {events.length > 0 ? (
               <div className="flex flex-wrap gap-2 text-sm">
                 {events.map((event) => (
-                  <button key={event.id} onClick={() => setActiveEventId(event.id)} className="rounded border border-slate-300 px-3 py-2 hover:bg-slate-100">
-                    Usar {event.name}
+                  <button
+                    key={event.id}
+                    onClick={() => {
+                      setActiveEventId(event.id);
+                      navigate(`/events/${event.id}/checkin`);
+                    }}
+                    className="rounded border border-slate-300 px-3 py-2 hover:bg-slate-100"
+                  >
+                    Abrir check-in de {event.name}
                   </button>
                 ))}
               </div>
@@ -309,19 +337,6 @@ function Checkin() {
               <p className="text-sm text-slate-600">No hay eventos disponibles para la organización activa.</p>
             )}
           </div>
-        ) : (
-          <>
-            <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm">
-              <p className="font-medium text-slate-900">Operando sobre: {activeEvent.name}</p>
-              <p className="text-slate-600">Slug: /{activeEvent.slug}</p>
-              <p className="mt-1 text-slate-600">Flujo corto operativo: panel operativo → check-in → actividad técnica solo si hace falta soporte.</p>
-            </div>
-            <div className="mt-4 flex flex-wrap gap-2">
-              <Button onClick={() => scan.mutate(prompt(`Código para ${activeEvent.name}`) ?? "")}>Validar código</Button>
-              <Link to={`/organizers/${activeOrganizer?.slug}/events/${activeEvent.slug}/dashboard`} className="rounded border border-slate-300 px-3 py-2 text-sm hover:bg-slate-100">Volver al panel operativo</Link>
-              <Link to={`/dashboard/events/${activeEvent.id}/activity`} className="rounded border border-slate-300 px-3 py-2 text-sm hover:bg-slate-100">Abrir soporte técnico</Link>
-            </div>
-          </>
         )}
       </Card>
     </PageSection>
@@ -391,7 +406,7 @@ function AdminApp() {
             <Routes>
               <Route path="/dashboard" element={<Dashboard role={role} onRoleChange={setRole} />} />
               <Route path="/events" element={<EventsIndex role={role} />} />
-              <Route path="/events/new" element={role === "admin" ? <CreateEvent /> : <Navigate to="/dashboard" replace />} />
+              <Route path="/events/new" element={<CreateEvent />} />
               <Route path="/events/:eventId/checkin" element={<EventScopedCheckin />} />
               <Route path="/dashboard/events/:eventId/activity" element={<EventActivityPage />} />
               <Route path="/organizers/:organizerSlug/events/:eventSlug/dashboard" element={<EventDashboardPage />} />

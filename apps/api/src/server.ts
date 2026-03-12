@@ -9,6 +9,7 @@ import { z } from "zod";
 import { Counter, Gauge, Histogram, collectDefaultMetrics, register } from "prom-client";
 import { confirmSchema, reserveSchema } from "@articket/shared";
 import { prisma } from "./lib/prisma.js";
+import { getOrganizerAuthorizationContext } from "./lib/adminAuthz.js";
 import { env } from "./lib/env.js";
 import { generateTicketCode, verifyTicketCode } from "./lib/qr.js";
 import { notificationQueue } from "./modules/notifications/queue.js";
@@ -239,6 +240,27 @@ app.post("/organizers", { preHandler: verifyAuth }, async (req: any) => {
 app.get("/organizers", { preHandler: verifyAuth }, async (req: any) => {
   const user = req.user as JwtPayload;
   return prisma.organizer.findMany({ where: { memberships: { some: { userId: user.userId } } } });
+});
+
+app.get("/authz/context", { preHandler: verifyAuth }, async (req: any) => {
+  const user = req.user as JwtPayload;
+  const query = z.object({ organizerId: z.string().uuid(), eventId: z.string().uuid().optional() }).parse(req.query ?? {});
+  const context = await getOrganizerAuthorizationContext(user.userId, query.organizerId);
+  if (!context) {
+    throw app.httpErrors.forbidden("Sin permisos para este organizador");
+  }
+
+  if (query.eventId) {
+    const event = await prisma.event.findUnique({ where: { id: query.eventId }, select: { id: true, organizerId: true } });
+    if (!event || event.organizerId !== query.organizerId) {
+      throw app.httpErrors.badRequest("eventId no pertenece al organizerId indicado");
+    }
+  }
+
+  return {
+    ...context,
+    ...(query.eventId ? { scope: "event" as const, eventId: query.eventId } : {})
+  };
 });
 
 app.post("/events", { preHandler: verifyAuth }, async (req: any) => {
