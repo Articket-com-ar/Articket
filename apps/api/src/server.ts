@@ -9,7 +9,7 @@ import { z } from "zod";
 import { Counter, Gauge, Histogram, collectDefaultMetrics, register } from "prom-client";
 import { confirmSchema, reserveSchema } from "@articket/shared";
 import { prisma } from "./lib/prisma.js";
-import { getOrganizerAuthorizationContext } from "./lib/adminAuthz.js";
+import { getOrganizerAuthorizationContext, requireEventCapability, requireOrganizerCapability } from "./lib/adminAuthz.js";
 import { env } from "./lib/env.js";
 import { generateTicketCode, verifyTicketCode } from "./lib/qr.js";
 import { notificationQueue } from "./modules/notifications/queue.js";
@@ -277,7 +277,7 @@ app.post("/events", { preHandler: verifyAuth }, async (req: any) => {
     })
     .parse(req.body);
   const user = req.user as JwtPayload;
-  await requireMembership(user.userId, body.organizerId, ["owner", "admin", "staff"]);
+  await requireOrganizerCapability(app, user.userId, body.organizerId, "createEvent");
   return prisma.event.create({ data: { ...body, startsAt: new Date(body.startsAt), endsAt: new Date(body.endsAt) } });
 });
 
@@ -299,8 +299,7 @@ app.post("/events/:id/ticket-types", { preHandler: verifyAuth }, async (req: any
     })
     .parse(req.body);
   const user = req.user as JwtPayload;
-  const event = await prisma.event.findUniqueOrThrow({ where: { id: req.params.id } });
-  await requireMembership(user.userId, event.organizerId, ["owner", "admin", "staff"]);
+  await requireEventCapability(app, user.userId, req.params.id, "manageTicketTypes");
   return prisma.ticketType.create({ data: { ...body, eventId: req.params.id, remaining: body.quota } });
 });
 
@@ -877,7 +876,7 @@ app.post("/late-payment-cases/:id/resolve", { preHandler: verifyAuth }, async (r
     throw app.httpErrors.notFound("LatePaymentCase no encontrado");
   }
 
-  await requireMembership(user.userId, lateCase.order.organizerId, ["owner", "admin", "staff"]);
+  await requireOrganizerCapability(app, user.userId, lateCase.order.organizerId, "resolveLatePayments");
 
   const statusByAction = {
     ACCEPT: "ACCEPTED",
