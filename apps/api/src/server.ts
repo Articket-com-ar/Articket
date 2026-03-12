@@ -9,6 +9,7 @@ import { z } from "zod";
 import { Counter, Gauge, Histogram, collectDefaultMetrics, register } from "prom-client";
 import { confirmSchema, reserveSchema } from "@articket/shared";
 import { prisma } from "./lib/prisma.js";
+import { getOrganizerAuthorizationContext, requireEventCapability, requireOrganizerCapability } from "./lib/adminAuthz.js";
 import { env } from "./lib/env.js";
 import { generateTicketCode, verifyTicketCode } from "./lib/qr.js";
 import { notificationQueue } from "./modules/notifications/queue.js";
@@ -241,6 +242,27 @@ app.get("/organizers", { preHandler: verifyAuth }, async (req: any) => {
   return prisma.organizer.findMany({ where: { memberships: { some: { userId: user.userId } } } });
 });
 
+app.get("/authz/context", { preHandler: verifyAuth }, async (req: any) => {
+  const user = req.user as JwtPayload;
+  const query = z.object({ organizerId: z.string().uuid(), eventId: z.string().uuid().optional() }).parse(req.query ?? {});
+  const context = await getOrganizerAuthorizationContext(user.userId, query.organizerId);
+  if (!context) {
+    throw app.httpErrors.forbidden("Sin permisos para este organizador");
+  }
+
+  if (query.eventId) {
+    const event = await prisma.event.findUnique({ where: { id: query.eventId }, select: { id: true, organizerId: true } });
+    if (!event || event.organizerId !== query.organizerId) {
+      throw app.httpErrors.badRequest("eventId no pertenece al organizerId indicado");
+    }
+  }
+
+  return {
+    ...context,
+    ...(query.eventId ? { scope: "event" as const, eventId: query.eventId } : {})
+  };
+});
+
 app.post("/events", { preHandler: verifyAuth }, async (req: any) => {
   const body = z
     .object({
@@ -255,7 +277,7 @@ app.post("/events", { preHandler: verifyAuth }, async (req: any) => {
     })
     .parse(req.body);
   const user = req.user as JwtPayload;
-  await requireMembership(user.userId, body.organizerId, ["owner", "admin", "staff"]);
+  await requireOrganizerCapability(app, user.userId, body.organizerId, "createEvent");
   return prisma.event.create({ data: { ...body, startsAt: new Date(body.startsAt), endsAt: new Date(body.endsAt) } });
 });
 
@@ -277,8 +299,7 @@ app.post("/events/:id/ticket-types", { preHandler: verifyAuth }, async (req: any
     })
     .parse(req.body);
   const user = req.user as JwtPayload;
-  const event = await prisma.event.findUniqueOrThrow({ where: { id: req.params.id } });
-  await requireMembership(user.userId, event.organizerId, ["owner", "admin", "staff"]);
+  await requireEventCapability(app, user.userId, req.params.id, "manageTicketTypes");
   return prisma.ticketType.create({ data: { ...body, eventId: req.params.id, remaining: body.quota } });
 });
 
@@ -659,8 +680,7 @@ app.get("/events/:eventId/activity", { preHandler: verifyAuth }, async (req: any
     includePayload: z.coerce.boolean().optional()
   }).parse(req.query ?? {});
 
-  const event = await prisma.event.findUniqueOrThrow({ where: { id: req.params.eventId } });
-  await requireMembership(user.userId, event.organizerId, ["owner", "admin", "staff", "scanner"]);
+  await requireEventCapability(app, user.userId, req.params.eventId, "viewEventActivity");
 
   const types = query.types ? query.types.split(",").map((x) => x.trim()).filter(Boolean) : undefined;
   if (types?.length) {
@@ -855,7 +875,7 @@ app.post("/late-payment-cases/:id/resolve", { preHandler: verifyAuth }, async (r
     throw app.httpErrors.notFound("LatePaymentCase no encontrado");
   }
 
-  await requireMembership(user.userId, lateCase.order.organizerId, ["owner", "admin", "staff"]);
+  await requireOrganizerCapability(app, user.userId, lateCase.order.organizerId, "resolveLatePayments");
 
   const statusByAction = {
     ACCEPT: "ACCEPTED",
