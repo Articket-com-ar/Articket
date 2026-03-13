@@ -93,6 +93,7 @@ app.addContentTypeParser("application/json", { parseAs: "buffer" }, (req, body, 
 
 app.decorateRequest("correlationId", "");
 app.decorateRequest("metricsStartAt", 0n);
+app.decorateRequest("rawBody", undefined);
 
 app.addHook("onRequest", async (req, reply) => {
   const incomingCorrelation = req.headers["x-correlation-id"];
@@ -339,7 +340,8 @@ app.post("/auth/login", async (req) => {
   }
   const accessToken = app.jwt.sign({ userId: user.id, email: user.email } as JwtPayload, { expiresIn: "15m" });
   const refreshToken = app.jwt.sign({ userId: user.id, email: user.email } as JwtPayload, {
-    expiresIn: "7d"
+    expiresIn: "7d",
+    key: env.jwtRefreshSecret
   });
   return { accessToken, refreshToken };
 });
@@ -793,7 +795,7 @@ app.post("/checkin/scan", { preHandler: verifyAuth }, async (req: any) => {
 });
 
 
-app.post("/orders/:id/resend-confirmation", { preHandler: verifyAuth }, async (req: FastifyRequest<{ Params: { id: string } }>) => {
+app.post("/orders/:id/resend-confirmation", { preHandler: verifyAuth }, async (req: any) => {
   const user = req.user as JwtPayload;
   const correlationId = req.correlationId;
   const order = await prisma.order.findUniqueOrThrow({ where: { id: req.params.id }, include: { event: true } });
