@@ -39,7 +39,6 @@ function encodeCursor(occurredAt: Date, id: string) {
   return Buffer.from(`${occurredAt.toISOString()}|${id}`, "utf8").toString("base64url");
 }
 
-const privilegedRoles: OrganizerRole[] = ["owner", "admin"];
 const allowedRoles: OrganizerRole[] = ["owner", "admin", "staff", "scanner"];
 
 function summarize(type: string, payload: Record<string, unknown>) {
@@ -91,23 +90,14 @@ export async function fetchEventActivity(prisma: PrismaClient, query: ActivityQu
 
   const items = slice.map((row) => {
     const payload = (row.payload ?? {}) as Record<string, unknown>;
-    const base = {
+    return {
       id: row.id,
       occurredAt: row.occurredAt,
       type: row.type,
-      version: row.version,
-      correlationId: row.correlationId,
       actor: { type: row.actorType, id: row.actorId },
       aggregate: { type: row.aggregateType, id: row.aggregateId },
-      orderId: row.orderId,
-      ticketId: row.ticketId,
       summary: summarize(row.type, payload)
     };
-
-    if (query.includePayload && privilegedRoles.includes(membership.role)) {
-      return { ...base, payload };
-    }
-    return base;
   });
 
   const nextCursor = hasMore ? encodeCursor(slice[slice.length - 1].occurredAt, slice[slice.length - 1].id) : null;
