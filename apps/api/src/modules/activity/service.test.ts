@@ -8,6 +8,12 @@ type EventRow = {
   payload: Record<string, unknown>;
   orderId: string | null;
   ticketId: string | null;
+  version?: number;
+  correlationId?: string | null;
+  actorType?: string;
+  actorId?: string | null;
+  aggregateType?: string;
+  aggregateId?: string;
 };
 
 function buildPrisma({ membership, rows = [] as EventRow[] }: { membership: any; rows?: EventRow[] }) {
@@ -44,7 +50,15 @@ function buildPrisma({ membership, rows = [] as EventRow[] }: { membership: any;
           ));
         }
 
-        return filtered.slice(0, take);
+        return filtered.slice(0, take).map((row) => ({
+          version: 1,
+          correlationId: null,
+          actorType: "user",
+          actorId: null,
+          aggregateType: "order",
+          aggregateId: row.orderId ?? row.ticketId ?? row.id,
+          ...row
+        }));
       }
     }
   } as any;
@@ -97,7 +111,7 @@ describe("fetchEventActivity", () => {
     expect(new Set(all).size).toBe(4);
   });
 
-  it("includePayload se ignora para roles no privilegiados", async () => {
+  it("devuelve solo shape base operativo", async () => {
     const rows: EventRow[] = [
       {
         id: "evt-1",
@@ -105,7 +119,13 @@ describe("fetchEventActivity", () => {
         type: "TICKET_CHECKED_IN",
         payload: { actorUserId: "user-staff", secret: "internal" },
         orderId: "ord-1",
-        ticketId: "tkt-1"
+        ticketId: "tkt-1",
+        version: 7,
+        correlationId: "corr-1",
+        actorType: "user",
+        actorId: "user-staff",
+        aggregateType: "ticket",
+        aggregateId: "tkt-1"
       }
     ];
 
@@ -115,6 +135,18 @@ describe("fetchEventActivity", () => {
       includePayload: true
     });
 
+    expect(res.items[0]).toEqual({
+      id: "evt-1",
+      occurredAt: new Date("2025-01-01T12:00:00.000Z"),
+      type: "TICKET_CHECKED_IN",
+      actor: { type: "user", id: "user-staff" },
+      aggregate: { type: "ticket", id: "tkt-1" },
+      summary: "Ticket validado en puerta"
+    });
     expect(res.items[0]).not.toHaveProperty("payload");
+    expect(res.items[0]).not.toHaveProperty("version");
+    expect(res.items[0]).not.toHaveProperty("correlationId");
+    expect(res.items[0]).not.toHaveProperty("orderId");
+    expect(res.items[0]).not.toHaveProperty("ticketId");
   });
 });
