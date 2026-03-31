@@ -9,6 +9,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./adminAuthz": {
+      "types": "./dist/adminAuthz.d.ts",
+      "import": "./dist/adminAuthz.js"
+    },
+    "./latePaymentCases": {
+      "types": "./dist/latePaymentCases.d.ts",
+      "import": "./dist/latePaymentCases.js"
     }
   },
   "files": [

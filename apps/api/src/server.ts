@@ -7,7 +7,16 @@ import bcrypt from "bcryptjs";
 import { nanoid } from "nanoid";
 import { z } from "zod";
 import { Counter, Gauge, Histogram, collectDefaultMetrics, register } from "prom-client";
-import { confirmSchema, reserveSchema } from "@articket/shared";
+import {
+  confirmSchema,
+  reserveSchema,
+  latePaymentCasesListSchema,
+  organizerMembersListSchema,
+  organizerMemberRoleUpdateInputSchema,
+  organizerMemberRoleUpdateResultSchema,
+  type LatePaymentCaseListItem,
+  type OrganizerMemberListItem
+} from "@articket/shared";
 import { prisma } from "./lib/prisma.js";
 import { getOrganizerAuthorizationContext, requireEventCapability, requireOrganizerCapability } from "./lib/adminAuthz.js";
 import { env } from "./lib/env.js";
@@ -25,12 +34,15 @@ import {
   paymentWebhookRejectedTotal,
   reserveRejectNoStockTotal,
   reserveIdempotentReplayTotal,
-  confirmIdempotentReplayTotal
+  confirmIdempotentReplayTotal,
+  webhookReplaysTotal,
+  webhookSignatureInvalidTotal
 } from "./observability/metrics.js";
 import { ACTIVITY_EVENT_TYPES, type ActivityEventType, fetchEventActivity } from "./modules/activity/service.js";
 import { registerDashboardRoutes } from "./modules/events/dashboard/dashboard.routes.js";
 import { applyPaymentEvent } from "./modules/payments/applyPaymentEvent.js";
 import { materializePayment } from "./modules/payments/materializePayment.js";
+import { getWebhookSecurityMode, readWebhookHeaders, verifyWebhookSignature } from "./modules/payments/webhookSecurity.js";
 
 const app = Fastify({ logger: true });
 
@@ -183,6 +195,10 @@ registerDashboardRoutes(app, verifyAuth);
 app.get("/health", async () => ({ ok: true }));
 
 app.get("/metrics", async (req, reply) => {
+  if (env.nodeEnv === "production" && !env.metricsToken) {
+    throw app.httpErrors.serviceUnavailable("METRICS_TOKEN requerido en production");
+  }
+
   if (env.metricsToken) {
     const token = req.headers["x-metrics-token"];
     if (token !== env.metricsToken) {
@@ -288,6 +304,160 @@ app.get("/events", { preHandler: verifyAuth }, async (req: any) => {
   return prisma.event.findMany({ where: { organizerId: query.organizerId } });
 });
 
+app.get("/organizers/:id/memberships", { preHandler: verifyAuth }, async (req: any) => {
+  const user = req.user as JwtPayload;
+  const params = z.object({ id: z.string().uuid() }).parse(req.params);
+  const authz = await requireOrganizerCapability(app, user.userId, params.id, "viewOrganizerSettings");
+
+  const rows = await prisma.membership.findMany({
+    where: { organizerId: params.id },
+    orderBy: [{ role: "asc" }, { user: { email: "asc" } }],
+    select: {
+      id: true,
+      userId: true,
+      role: true,
+      organizer: { select: { id: true, name: true, slug: true } },
+      user: { select: { email: true } }
+    }
+  });
+
+  const capabilityMapByRole = {
+    owner: {
+      viewOrganizerSettings: true,
+      createEvent: true,
+      manageTicketTypes: true,
+      viewEventDashboard: true,
+      operateEvent: true,
+      scanTickets: true,
+      viewEventActivity: true,
+      viewLatePaymentCases: true,
+      resolveLatePayments: true,
+      resendOrderConfirmation: true
+    },
+    admin: {
+      viewOrganizerSettings: true,
+      createEvent: true,
+      manageTicketTypes: true,
+      viewEventDashboard: true,
+      operateEvent: true,
+      scanTickets: true,
+      viewEventActivity: true,
+      viewLatePaymentCases: true,
+      resolveLatePayments: true,
+      resendOrderConfirmation: true
+    },
+    staff: {
+      viewOrganizerSettings: false,
+      createEvent: false,
+      manageTicketTypes: false,
+      viewEventDashboard: true,
+      operateEvent: true,
+      scanTickets: true,
+      viewEventActivity: true,
+      viewLatePaymentCases: true,
+      resolveLatePayments: false,
+      resendOrderConfirmation: true
+    },
+    scanner: {
+      viewOrganizerSettings: false,
+      createEvent: false,
+      manageTicketTypes: false,
+      viewEventDashboard: true,
+      operateEvent: true,
+      scanTickets: true,
+      viewEventActivity: false,
+      viewLatePaymentCases: false,
+      resolveLatePayments: false,
+      resendOrderConfirmation: false
+    }
+  } as const;
+
+  const dto: OrganizerMemberListItem[] = rows.map((row) => ({
+    membershipId: row.id,
+    userId: row.userId,
+    organizerId: row.organizer.id,
+    organizerName: row.organizer.name,
+    organizerSlug: row.organizer.slug,
+    email: row.user.email,
+    role: row.role,
+    canChangeRole: authz.organizerRole === "owner" && row.role !== "owner" && row.userId !== user.userId,
+    allowedRoleTargets: row.role === "owner" ? [] : ["admin", "staff", "scanner"],
+    capabilities: capabilityMapByRole[row.role]
+  }));
+
+  return organizerMembersListSchema.parse(dto);
+});
+
+app.post("/organizers/:id/memberships/:membershipId/role", { preHandler: verifyAuth }, async (req: any) => {
+  const user = req.user as JwtPayload;
+  const params = z.object({ id: z.string().uuid(), membershipId: z.string().uuid() }).parse(req.params);
+  const body = organizerMemberRoleUpdateInputSchema.parse(req.body ?? {});
+
+  const actorMembership = await prisma.membership.findUnique({
+    where: { userId_organizerId: { userId: user.userId, organizerId: params.id } },
+    select: { userId: true, organizerId: true, role: true }
+  });
+
+  if (!actorMembership || actorMembership.role !== "owner") {
+    throw app.httpErrors.forbidden("Solo owner puede cambiar roles de la organización");
+  }
+
+  const targetMembership = await prisma.membership.findUnique({
+    where: { id: params.membershipId },
+    include: { user: { select: { email: true } } }
+  });
+
+  if (!targetMembership || targetMembership.organizerId !== params.id) {
+    throw app.httpErrors.notFound("Membership no encontrado");
+  }
+
+  if (targetMembership.role === "owner") {
+    throw app.httpErrors.conflict("No se puede mutar un owner en esta fase");
+  }
+
+  if (targetMembership.userId === user.userId) {
+    throw app.httpErrors.conflict("Owner no puede auto-modificar su membership en esta fase");
+  }
+
+  if (targetMembership.role === body.role) {
+    throw app.httpErrors.conflict("El miembro ya tiene ese rol");
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    const updated = await tx.membership.update({
+      where: { id: targetMembership.id },
+      data: { role: body.role }
+    });
+
+    const audit = await tx.auditLog.create({
+      data: {
+        organizerId: params.id,
+        actorUserId: user.userId,
+        action: "membership.role_changed",
+        entityType: "membership",
+        entityId: targetMembership.id,
+        metadata: {
+          targetUserId: targetMembership.userId,
+          targetEmail: targetMembership.user.email,
+          previousRole: targetMembership.role,
+          role: body.role
+        }
+      }
+    });
+
+    return {
+      membershipId: updated.id,
+      organizerId: updated.organizerId,
+      userId: updated.userId,
+      previousRole: targetMembership.role,
+      role: updated.role,
+      auditLogId: audit.id
+    };
+  });
+
+  return organizerMemberRoleUpdateResultSchema.parse(result);
+});
+
 app.post("/events/:id/ticket-types", { preHandler: verifyAuth }, async (req: any) => {
   const body = z
     .object({
@@ -304,7 +474,22 @@ app.post("/events/:id/ticket-types", { preHandler: verifyAuth }, async (req: any
 });
 
 app.get("/events/:id/ticket-types", async (req: any) => {
-  return prisma.ticketType.findMany({ where: { eventId: req.params.id } });
+  const event = await prisma.event.findUnique({ where: { id: req.params.id }, select: { id: true, visibility: true } });
+  if (!event || event.visibility !== "published") {
+    throw app.httpErrors.notFound("Evento no publicado");
+  }
+
+  return prisma.ticketType.findMany({
+    where: { eventId: req.params.id },
+    select: {
+      id: true,
+      eventId: true,
+      name: true,
+      priceCents: true,
+      currency: true,
+      maxPerOrder: true
+    }
+  });
 });
 
 app.post("/checkout/reserve", async (req: any) => {
@@ -314,8 +499,6 @@ app.post("/checkout/reserve", async (req: any) => {
   const now = new Date();
   const expiresAt = new Date(now.getTime() + 10 * 60 * 1000);
 
-  // --- IDEMPOTENCY CHECK ---
-  // Si ya existe una orden para este clientRequestId, devolverla sin crear nada nuevo.
   const existingKey = await prisma.reserveIdempotencyKey.findUnique({
     where: { clientRequestId: body.clientRequestId },
     include: { order: { include: { items: true } } }
@@ -328,9 +511,7 @@ app.post("/checkout/reserve", async (req: any) => {
       reserveIdempotentReplayTotal.inc();
       return existingKey.order;
     }
-    // La clave existe pero la orden fue eliminada (SET NULL): tratar como request nueva
   }
-  // --- END IDEMPOTENCY CHECK ---
 
   try {
     const order = await prisma.$transaction(async (tx) => {
@@ -341,21 +522,14 @@ app.post("/checkout/reserve", async (req: any) => {
 
       const ticketTypes = [] as Awaited<ReturnType<typeof tx.ticketType.findUniqueOrThrow>>[];
       let subtotal = 0;
-
-      // Ordenar items por ticketTypeId para evitar deadlocks por lock ordering
-      const sortedItems = [...body.items].sort((a, b) =>
-        a.ticketTypeId.localeCompare(b.ticketTypeId)
-      );
+      const sortedItems = [...body.items].sort((a, b) => a.ticketTypeId.localeCompare(b.ticketTypeId));
 
       for (const item of sortedItems) {
-        // FOR UPDATE serializes concurrent reservations on the same TicketType row.
         await tx.$queryRaw`SELECT id FROM "TicketType" WHERE id = CAST(${item.ticketTypeId} AS uuid) FOR UPDATE`;
         const tt = await tx.ticketType.findUniqueOrThrow({ where: { id: item.ticketTypeId } });
         if (tt.eventId !== body.eventId) throw new Error("Ticket type inválido");
         if (item.quantity > tt.maxPerOrder) throw new Error("Supera máximo por orden");
 
-        // Atomic decrement with guard. Returns 0 if remaining < quantity (no stock).
-        // This replaces the two aggregate queries and is the authoritative stock check.
         const stockUpdated = await tx.$executeRaw`
           UPDATE "TicketType"
           SET remaining = remaining - ${item.quantity}
@@ -403,19 +577,12 @@ app.post("/checkout/reserve", async (req: any) => {
         include: { items: true }
       });
 
-      // Persistir la clave de idempotencia DENTRO de la transacción.
-      // Si la TX falla, la clave no queda guardada y el retry es libre de reintentar.
-      // P2002: dos requests concurrentes con el mismo clientRequestId llegaron juntas.
-      // La DB garantiza que solo una gana. La que pierde debe buscar la orden ganadora
-      // y relanzar el error para que el handler externo la devuelva correctamente.
       try {
         await tx.reserveIdempotencyKey.create({
           data: { clientRequestId: body.clientRequestId, orderId: createdOrder.id }
         });
       } catch (idempotencyError: any) {
         if (idempotencyError?.code === "P2002") {
-          // Otra request concurrente ya creó la clave. Relanzar con señal especial
-          // para que el handler externo pueda hacer el lookup y devolver esa orden.
           const raceError = new Error("RESERVE_IDEMPOTENCY_RACE");
           (raceError as any).code = "RESERVE_IDEMPOTENCY_RACE";
           throw raceError;
@@ -449,8 +616,6 @@ app.post("/checkout/reserve", async (req: any) => {
     }
 
     if (error?.code === "RESERVE_IDEMPOTENCY_RACE") {
-      // Race condition resuelta: otra TX concurrente ganó con el mismo clientRequestId.
-      // Buscar la orden que esa TX creó y devolverla como si fuera un replay normal.
       const winner = await prisma.reserveIdempotencyKey.findUnique({
         where: { clientRequestId: body.clientRequestId },
         include: { order: { include: { items: true } } }
@@ -461,7 +626,6 @@ app.post("/checkout/reserve", async (req: any) => {
         reserveIdempotentReplayTotal.inc();
         return winner.order;
       }
-      // Si por alguna razón no existe aún (timing extremo), dejar que suba como error
     }
 
     checkoutReserveTotal.inc({ status: "error" });
@@ -474,17 +638,12 @@ app.post("/checkout/confirm", async (req: any) => {
   const correlationId = req.correlationId as string;
   req.log.info({ correlationId, orderId: body.orderId, clientRequestId: body.clientRequestId }, "checkout confirm request");
 
-  // --- IDEMPOTENCY CHECK ---
-  // Fast path: if this clientRequestId was already processed, return the same result.
-  // We also validate payload consistency to catch client bugs early (before TX overhead).
   const existingKey = await prisma.confirmIdempotencyKey.findUnique({
     where: { clientRequestId: body.clientRequestId },
     include: { order: { include: { tickets: true } } }
   });
 
   if (existingKey) {
-    // Same clientRequestId but different payload = client bug / security issue.
-    // Return 409 so the client knows their state is inconsistent.
     if (existingKey.orderId !== body.orderId || existingKey.paymentReference !== body.paymentReference) {
       req.log.warn({
         correlationId,
@@ -501,13 +660,11 @@ app.post("/checkout/confirm", async (req: any) => {
       throw conflictError;
     }
 
-    // Same payload: safe replay.
     req.log.info({ correlationId, clientRequestId: body.clientRequestId, orderId: body.orderId }, "checkout confirm idempotent replay");
     confirmIdempotentReplayTotal.inc();
     checkoutConfirmTotal.inc({ status: "idempotent_replay" });
     return existingKey.order;
   }
-  // --- END IDEMPOTENCY CHECK ---
 
   try {
     const order = await prisma.$transaction(async (tx) => {
@@ -517,8 +674,6 @@ app.post("/checkout/confirm", async (req: any) => {
       if (!order) throw new Error("Orden inválida");
 
       if (order.status === "paid") {
-        // Order already paid (e.g. concurrent webhook arrived first).
-        // Enforce paymentReference consistency for new clientRequestId values.
         const existingOrderPayment = await tx.payment.findFirst({
           where: { orderId: order.id, provider: "mock" },
           orderBy: { createdAt: "desc" }
@@ -540,7 +695,6 @@ app.post("/checkout/confirm", async (req: any) => {
           throw conflictError;
         }
 
-        // Persist idempotency key so future retries are fast.
         try {
           await tx.confirmIdempotencyKey.create({
             data: { clientRequestId: body.clientRequestId, orderId: body.orderId, paymentReference: body.paymentReference }
@@ -624,16 +778,12 @@ app.post("/checkout/confirm", async (req: any) => {
         data: { releasedAt: new Date(), releaseReason: "consumed_by_payment" }
       });
 
-      // Persist idempotency key inside TX.
-      // If TX fails, key is not stored and retry is free to re-attempt.
-      // P2002 here means two concurrent confirms raced — both are equivalent, safe to ignore.
       try {
         await tx.confirmIdempotencyKey.create({
           data: { clientRequestId: body.clientRequestId, orderId: order.id, paymentReference: body.paymentReference }
         });
       } catch (e: any) {
         if (e?.code !== "P2002") throw e;
-        // Race resolved: another concurrent request created the key. No-op.
       }
 
       return tx.order.findUnique({ where: { id: order.id }, include: { tickets: true } });
@@ -662,12 +812,11 @@ app.get("/tickets/validate/:code", async (req: any) => {
     ticketValidateTotal.inc({ status: "invalid" });
     return {
       valid: false,
-      reason: validation.reason,
-      ...(validation.ticket?.checkedInAt ? { checkedInAt: validation.ticket.checkedInAt } : {})
+      reason: validation.reason
     };
   }
   ticketValidateTotal.inc({ status: "valid" });
-  return { valid: true, ticketId: validation.ticket.id, eventId: validation.ticket.eventId };
+  return { valid: true };
 });
 
 
@@ -832,9 +981,9 @@ app.get("/late-payment-cases", { preHandler: verifyAuth }, async (req: any) => {
     })
     .parse(req.query ?? {});
 
-  await requireMembership(user.userId, query.organizerId, ["owner", "admin", "staff"]);
+  await requireOrganizerCapability(app, user.userId, query.organizerId, "viewLatePaymentCases");
 
-  return prisma.latePaymentCase.findMany({
+  const rows = await prisma.latePaymentCase.findMany({
     where: {
       status: query.status,
       ...(query.provider ? { provider: query.provider.toLowerCase() } : {}),
@@ -849,9 +998,39 @@ app.get("/late-payment-cases", { preHandler: verifyAuth }, async (req: any) => {
         : {}),
       order: { organizerId: query.organizerId }
     },
+    select: {
+      id: true,
+      orderId: true,
+      provider: true,
+      providerPaymentId: true,
+      status: true,
+      reason: true,
+      detectedAt: true,
+      resolvedAt: true,
+      resolutionNotes: true,
+      version: true,
+      order: { select: { organizerId: true, eventId: true } }
+    },
     orderBy: { detectedAt: "desc" },
     take: query.limit
   });
+
+  const dto: LatePaymentCaseListItem[] = rows.map((row) => ({
+    id: row.id,
+    organizerId: row.order.organizerId,
+    eventId: row.order.eventId,
+    orderId: row.orderId,
+    provider: row.provider,
+    paymentAttemptId: row.providerPaymentId,
+    status: row.status as LatePaymentCaseListItem["status"],
+    reason: row.reason,
+    detectedAt: row.detectedAt.toISOString(),
+    resolvedAt: row.resolvedAt ? row.resolvedAt.toISOString() : null,
+    resolutionNotes: row.resolutionNotes,
+    version: row.version
+  }));
+
+  return latePaymentCasesListSchema.parse(dto);
 });
 
 app.post("/late-payment-cases/:id/resolve", { preHandler: verifyAuth }, async (req: any) => {
@@ -969,8 +1148,26 @@ app.post("/late-payment-cases/:id/resolve", { preHandler: verifyAuth }, async (r
 app.post<{ Params: { provider: string } }>("/webhooks/payments/:provider", async (req) => {
   const params = z.object({ provider: z.string().min(1) }).parse(req.params);
   const body = (req.body ?? {}) as any;
-
   const provider = params.provider.toLowerCase();
+  const securityMode = getWebhookSecurityMode(provider, env.nodeEnv);
+  const webhookHeaders = readWebhookHeaders(req);
+
+  if (securityMode === "strict") {
+    const verification = verifyWebhookSignature({
+      secret: env.paymentsWebhookSecret,
+      rawBody: req.rawBody,
+      signature: webhookHeaders.signature,
+      timestamp: webhookHeaders.timestamp
+    });
+
+    if (!verification.ok) {
+      webhookSignatureInvalidTotal.inc({ provider, reason: verification.reason });
+      paymentWebhookRejectedTotal.inc({ provider, reason: verification.reason });
+      req.log.warn({ correlationId: req.correlationId, provider, reason: verification.reason }, "payment webhook signature rejected");
+      throw app.httpErrors.unauthorized(`Webhook rechazado: ${verification.reason}`);
+    }
+  }
+
   const providerEventId =
     (typeof body.id === "string" || typeof body.id === "number")
       ? String(body.id)
@@ -988,6 +1185,7 @@ app.post<{ Params: { provider: string } }>("/webhooks/payments/:provider", async
     throw app.httpErrors.badRequest("providerEventId requerido");
   }
 
+  const replayKey = webhookHeaders.replayKey ?? `${provider}:${providerEventId}`;
   const providerPaymentIdRaw = body?.data?.id ?? body?.payment_id ?? body?.paymentId;
   const providerPaymentId = providerPaymentIdRaw == null ? null : String(providerPaymentIdRaw);
   const eventType = typeof body.type === "string"
@@ -1024,6 +1222,10 @@ app.post<{ Params: { provider: string } }>("/webhooks/payments/:provider", async
       providerPaymentId,
       orderId: parsedOrderId,
       eventType,
+      securityMode,
+      replayKey,
+      signed: Boolean(webhookHeaders.signature),
+      webhookTimestamp: webhookHeaders.timestamp,
       outcome: "stored"
     }, "payment webhook stored");
 
@@ -1063,7 +1265,7 @@ app.post<{ Params: { provider: string } }>("/webhooks/payments/:provider", async
       }
     }
 
-    return { ok: true, deduped: false };
+    return { ok: true, deduped: false, securityMode };
   } catch (error: any) {
     const uniqueTarget = Array.isArray(error?.meta?.target)
       ? error.meta.target.map(String).join(",")
@@ -1087,6 +1289,7 @@ app.post<{ Params: { provider: string } }>("/webhooks/payments/:provider", async
       }
 
       paymentWebhookDedupedTotal.inc({ provider });
+      webhookReplaysTotal.inc({ provider, reason: "provider_event_id" });
       req.log.info({
         correlationId: req.correlationId,
         provider,
@@ -1096,7 +1299,7 @@ app.post<{ Params: { provider: string } }>("/webhooks/payments/:provider", async
         eventType,
         outcome: "deduped"
       }, "payments webhook deduped");
-      return { ok: true, deduped: true };
+      return { ok: true, deduped: true, securityMode };
     }
 
     if (error?.statusCode) throw error;
@@ -1143,4 +1346,3 @@ app.setErrorHandler((error: Error & { statusCode?: number; code?: string }, req:
 });
 
 await app.listen({ host: "0.0.0.0", port: env.apiPort });
-
