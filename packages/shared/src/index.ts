@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export * from "./adminAuthz.js";
+export * from "./organizerMembers.js";
 
 export const reserveSchema = z.object({
   clientRequestId: z.string().min(1, "clientRequestId es obligatorio"),
