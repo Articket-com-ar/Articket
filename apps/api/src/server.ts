@@ -7,7 +7,14 @@ import bcrypt from "bcryptjs";
 import { nanoid } from "nanoid";
 import { z } from "zod";
 import { Counter, Gauge, Histogram, collectDefaultMetrics, register } from "prom-client";
-import { confirmSchema, reserveSchema } from "@articket/shared";
+import {
+  confirmSchema,
+  reserveSchema,
+  organizerMembersListSchema,
+  organizerMemberRoleUpdateInputSchema,
+  organizerMemberRoleUpdateResultSchema,
+  type OrganizerMemberListItem
+} from "@articket/shared";
 import { prisma } from "./lib/prisma.js";
 import { getOrganizerAuthorizationContext, requireEventCapability, requireOrganizerCapability } from "./lib/adminAuthz.js";
 import { env } from "./lib/env.js";
@@ -286,6 +293,120 @@ app.get("/events", { preHandler: verifyAuth }, async (req: any) => {
   const query = z.object({ organizerId: z.string().uuid() }).parse(req.query);
   await requireMembership(user.userId, query.organizerId);
   return prisma.event.findMany({ where: { organizerId: query.organizerId } });
+});
+
+app.get("/organizers/:id/memberships", { preHandler: verifyAuth }, async (req: any) => {
+  const user = req.user as JwtPayload;
+  const params = z.object({ id: z.string().uuid() }).parse(req.params);
+  const authz = await requireOrganizerCapability(app, user.userId, params.id, "viewOrganizerSettings");
+
+  const rows = await prisma.membership.findMany({
+    where: { organizerId: params.id },
+    orderBy: [{ role: "asc" }, { user: { email: "asc" } }],
+    select: {
+      id: true,
+      userId: true,
+      role: true,
+      organizer: { select: { id: true, name: true, slug: true } },
+      user: { select: { email: true } }
+    }
+  });
+
+  const dto: OrganizerMemberListItem[] = rows.map((row) => ({
+    membershipId: row.id,
+    userId: row.userId,
+    organizerId: row.organizer.id,
+    organizerName: row.organizer.name,
+    organizerSlug: row.organizer.slug,
+    email: row.user.email,
+    role: row.role,
+    canChangeRole: authz.organizerRole === "owner" && row.role !== "owner" && row.userId !== user.userId,
+    allowedRoleTargets: row.role === "owner" ? [] : ["admin", "staff", "scanner"],
+    capabilities: {
+      viewOrganizerSettings: row.role === "owner" || row.role === "admin",
+      createEvent: row.role === "owner" || row.role === "admin",
+      manageTicketTypes: row.role === "owner" || row.role === "admin",
+      viewEventDashboard: true,
+      operateEvent: true,
+      scanTickets: true,
+      viewEventActivity: row.role !== "scanner",
+      viewLatePaymentCases: row.role !== "scanner",
+      resolveLatePayments: row.role === "owner" || row.role === "admin",
+      resendOrderConfirmation: row.role !== "scanner"
+    }
+  }));
+
+  return organizerMembersListSchema.parse(dto);
+});
+
+app.post("/organizers/:id/memberships/:membershipId/role", { preHandler: verifyAuth }, async (req: any) => {
+  const user = req.user as JwtPayload;
+  const params = z.object({ id: z.string().uuid(), membershipId: z.string().uuid() }).parse(req.params);
+  const body = organizerMemberRoleUpdateInputSchema.parse(req.body ?? {});
+
+  const actorMembership = await prisma.membership.findUnique({
+    where: { userId_organizerId: { userId: user.userId, organizerId: params.id } },
+    select: { userId: true, organizerId: true, role: true }
+  });
+
+  if (!actorMembership || actorMembership.role !== "owner") {
+    throw app.httpErrors.forbidden("Solo owner puede cambiar roles de la organización");
+  }
+
+  const targetMembership = await prisma.membership.findUnique({
+    where: { id: params.membershipId },
+    include: { user: { select: { email: true } } }
+  });
+
+  if (!targetMembership || targetMembership.organizerId !== params.id) {
+    throw app.httpErrors.notFound("Membership no encontrado");
+  }
+
+  if (targetMembership.role === "owner") {
+    throw app.httpErrors.conflict("No se puede mutar un owner en esta fase");
+  }
+
+  if (targetMembership.userId === user.userId) {
+    throw app.httpErrors.conflict("Owner no puede auto-modificar su membership en esta fase");
+  }
+
+  if (targetMembership.role === body.role) {
+    throw app.httpErrors.conflict("El miembro ya tiene ese rol");
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    const updated = await tx.membership.update({
+      where: { id: targetMembership.id },
+      data: { role: body.role }
+    });
+
+    const audit = await tx.auditLog.create({
+      data: {
+        organizerId: params.id,
+        actorUserId: user.userId,
+        action: "membership.role_changed",
+        entityType: "membership",
+        entityId: targetMembership.id,
+        metadata: {
+          targetUserId: targetMembership.userId,
+          targetEmail: targetMembership.user.email,
+          previousRole: targetMembership.role,
+          role: body.role
+        }
+      }
+    });
+
+    return {
+      membershipId: updated.id,
+      organizerId: updated.organizerId,
+      userId: updated.userId,
+      previousRole: targetMembership.role,
+      role: updated.role,
+      auditLogId: audit.id
+    };
+  });
+
+  return organizerMemberRoleUpdateResultSchema.parse(result);
 });
 
 app.post("/events/:id/ticket-types", { preHandler: verifyAuth }, async (req: any) => {
