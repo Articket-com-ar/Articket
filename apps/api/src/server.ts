@@ -42,7 +42,7 @@ import { registerDashboardRoutes } from "./modules/events/dashboard/dashboard.ro
 import { applyPaymentEvent } from "./modules/payments/applyPaymentEvent.js";
 import { materializePayment } from "./modules/payments/materializePayment.js";
 
-const app = Fastify({ logger: true });
+export const app = Fastify({ logger: true });
 
 collectDefaultMetrics();
 
@@ -1398,5 +1398,7 @@ app.setErrorHandler((error: Error & { statusCode?: number; code?: string }, req:
   });
 });
 
-await app.listen({ host: "0.0.0.0", port: env.apiPort });
+if (!app.server.listening) {
+  await app.listen({ host: "0.0.0.0", port: env.apiPort });
+}
 

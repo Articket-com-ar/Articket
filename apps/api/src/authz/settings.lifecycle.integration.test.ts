@@ -2,8 +2,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import bcrypt from "bcryptjs";
 import { prisma } from "../lib/prisma.js";
 import { hasIntegrationEnv } from "../modules/payments/integrationTestEnv.js";
+import { allocateIntegrationPort, startIntegrationServer, stopIntegrationServer } from "../test/integrationServerHarness.js";
 
-process.env.API_PORT = process.env.API_PORT ?? "3000";
+const suiteKey = "authz-settings-lifecycle";
+process.env.API_PORT = process.env.API_PORT ?? String(allocateIntegrationPort(suiteKey));
 process.env.JWT_ACCESS_SECRET ||= "test-access-secret-min-24-ch";
 process.env.JWT_REFRESH_SECRET ||= "test-refresh-secret-24-ch";
 process.env.QR_SECRET ||= "test-qr-secret-min-24-ch";
@@ -31,16 +33,18 @@ describe.skipIf(!hasIntegrationEnv)("settings membership lifecycle integration",
   };
 
   beforeAll(async () => {
-    await import("../server.js");
+    await startIntegrationServer(suiteKey);
     await waitForHealth();
   });
 
   afterAll(async () => {
-    if (created.organizerIds.length === 0) return;
-    await prisma.auditLog.deleteMany({ where: { id: { in: created.auditLogIds } } });
-    await prisma.membership.deleteMany({ where: { organizerId: { in: created.organizerIds } } });
-    await prisma.organizer.deleteMany({ where: { id: { in: created.organizerIds } } });
-    await prisma.user.deleteMany({ where: { id: { in: created.userIds } } });
+    if (created.organizerIds.length > 0) {
+      await prisma.auditLog.deleteMany({ where: { id: { in: created.auditLogIds } } });
+      await prisma.membership.deleteMany({ where: { organizerId: { in: created.organizerIds } } });
+      await prisma.organizer.deleteMany({ where: { id: { in: created.organizerIds } } });
+      await prisma.user.deleteMany({ where: { id: { in: created.userIds } } });
+    }
+    await stopIntegrationServer(suiteKey);
   });
 
   async function createUser(emailPrefix: string) {

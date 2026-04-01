@@ -3,9 +3,11 @@ import bcrypt from "bcryptjs";
 import { prisma } from "../lib/prisma.js";
 import { generateTicketCode } from "../lib/qr.js";
 import { hasIntegrationEnv } from "../modules/payments/integrationTestEnv.js";
+import { allocateIntegrationPort, startIntegrationServer, stopIntegrationServer } from "../test/integrationServerHarness.js";
 import { getOrganizerRoleCapabilities, type OrganizerRole } from "@articket/shared";
 
-process.env.API_PORT = process.env.API_PORT ?? "3000";
+const suiteKey = "authz-admin";
+process.env.API_PORT = process.env.API_PORT ?? String(allocateIntegrationPort(suiteKey));
 process.env.JWT_ACCESS_SECRET ||= "test-access-secret-min-24-ch";
 process.env.JWT_REFRESH_SECRET ||= "test-refresh-secret-24-ch";
 process.env.QR_SECRET ||= "test-qr-secret-min-24-ch";
@@ -36,25 +38,26 @@ describe.skipIf(!hasIntegrationEnv)("admin authz phase 1 integration", () => {
   };
 
   beforeAll(async () => {
-    await import("../server.js");
+    await startIntegrationServer(suiteKey);
     await waitForHealth();
   });
 
   afterAll(async () => {
-    if (created.organizerIds.length === 0) return;
-
-    await prisma.ticketScan.deleteMany({ where: { eventId: { in: created.eventIds } } });
-    await prisma.domainEvent.deleteMany({ where: { organizerId: { in: created.organizerIds } } });
-    await prisma.emailEvent.deleteMany({ where: { orderId: { in: created.orderIds } } });
-    await prisma.latePaymentCase.deleteMany({ where: { id: { in: created.lateCaseIds } } });
-    await prisma.ticket.deleteMany({ where: { id: { in: created.ticketIds } } });
-    await prisma.orderItem.deleteMany({ where: { orderId: { in: created.orderIds } } });
-    await prisma.order.deleteMany({ where: { id: { in: created.orderIds } } });
-    await prisma.ticketType.deleteMany({ where: { id: { in: created.ticketTypeIds } } });
-    await prisma.event.deleteMany({ where: { id: { in: created.eventIds } } });
-    await prisma.membership.deleteMany({ where: { organizerId: { in: created.organizerIds } } });
-    await prisma.organizer.deleteMany({ where: { id: { in: created.organizerIds } } });
-    await prisma.user.deleteMany({ where: { id: { in: created.userIds } } });
+    if (created.organizerIds.length > 0) {
+      await prisma.ticketScan.deleteMany({ where: { eventId: { in: created.eventIds } } });
+      await prisma.domainEvent.deleteMany({ where: { organizerId: { in: created.organizerIds } } });
+      await prisma.emailEvent.deleteMany({ where: { orderId: { in: created.orderIds } } });
+      await prisma.latePaymentCase.deleteMany({ where: { id: { in: created.lateCaseIds } } });
+      await prisma.ticket.deleteMany({ where: { id: { in: created.ticketIds } } });
+      await prisma.orderItem.deleteMany({ where: { orderId: { in: created.orderIds } } });
+      await prisma.order.deleteMany({ where: { id: { in: created.orderIds } } });
+      await prisma.ticketType.deleteMany({ where: { id: { in: created.ticketTypeIds } } });
+      await prisma.event.deleteMany({ where: { id: { in: created.eventIds } } });
+      await prisma.membership.deleteMany({ where: { organizerId: { in: created.organizerIds } } });
+      await prisma.organizer.deleteMany({ where: { id: { in: created.organizerIds } } });
+      await prisma.user.deleteMany({ where: { id: { in: created.userIds } } });
+    }
+    await stopIntegrationServer(suiteKey);
   });
 
   async function createUser(role: OrganizerRole, organizerId: string) {
@@ -119,17 +122,12 @@ describe.skipIf(!hasIntegrationEnv)("admin authz phase 1 integration", () => {
     });
     created.eventIds.push(event.id);
 
-    const ticketType = await prisma.ticketType.create({
-      data: {
-        eventId: event.id,
-        name: "General",
-        priceCents: 1500,
-        currency: "ARS",
-        quota: 100,
-        remaining: 99,
-        maxPerOrder: 10
-      }
-    });
+    const insertedTicketType = await prisma.$queryRaw<Array<{ id: string }>>`
+      INSERT INTO "TicketType" ("id", "eventId", "name", "priceCents", "currency", "quota", "maxPerOrder", "remaining", "createdAt")
+      VALUES (gen_random_uuid(), ${event.id}::uuid, ${"General"}, ${1500}, ${"ARS"}, ${100}, ${10}, ${99}, NOW())
+      RETURNING "id"
+    `;
+    const ticketType = { id: insertedTicketType[0].id };
     created.ticketTypeIds.push(ticketType.id);
 
     const owner = await createUser("owner", organizer.id);
@@ -385,14 +383,91 @@ describe.skipIf(!hasIntegrationEnv)("admin authz phase 1 integration", () => {
     created.ticketTypeIds.push(newTicketType.id);
   });
 
+  it("enforces organizer settings capabilities: owner/admin can view, scanner cannot, only owner can mutate roles", async () => {
+    const scenario = await seedScenario();
+    const ownerToken = await login(scenario.owner.email, scenario.owner.password);
+    const adminToken = await login(scenario.admin.email, scenario.admin.password);
+    const staffToken = await login(scenario.staff.email, scenario.staff.password);
+    const scannerToken = await login(scenario.scanner.email, scenario.scanner.password);
+
+    const ownerMembers = await authFetch(`/organizers/${scenario.organizer.id}/memberships`, ownerToken);
+    expect(ownerMembers.status).toBe(200);
+    const ownerMembersJson = await ownerMembers.json() as any[];
+    expect(ownerMembersJson.some((row) => row.role === "owner")).toBe(true);
+    expect(ownerMembersJson.some((row) => row.role === "admin")).toBe(true);
+    expect(ownerMembersJson[0]).toEqual(expect.objectContaining({
+      membershipId: expect.any(String),
+      organizerId: scenario.organizer.id,
+      organizerName: scenario.organizer.name,
+      organizerSlug: scenario.organizer.slug,
+      email: expect.any(String),
+      role: expect.any(String)
+    }));
+
+    const adminMembers = await authFetch(`/organizers/${scenario.organizer.id}/memberships`, adminToken);
+    expect(adminMembers.status).toBe(200);
+
+    const staffMembers = await authFetch(`/organizers/${scenario.organizer.id}/memberships`, staffToken);
+    expect(staffMembers.status).toBe(403);
+
+    const scannerMembers = await authFetch(`/organizers/${scenario.organizer.id}/memberships`, scannerToken);
+    expect(scannerMembers.status).toBe(403);
+
+    const ownerMembership = ownerMembersJson.find((row) => row.role === "owner");
+    const adminMembership = ownerMembersJson.find((row) => row.role === "admin");
+    expect(ownerMembership).toBeTruthy();
+    expect(adminMembership).toBeTruthy();
+
+    const adminMutate = await authFetch(`/organizers/${scenario.organizer.id}/memberships/${adminMembership.membershipId}/role`, adminToken, {
+      method: "POST",
+      body: JSON.stringify({ role: "staff" })
+    });
+    expect(adminMutate.status).toBe(403);
+
+    const ownerMutateAdmin = await authFetch(`/organizers/${scenario.organizer.id}/memberships/${adminMembership.membershipId}/role`, ownerToken, {
+      method: "POST",
+      body: JSON.stringify({ role: "staff" })
+    });
+    expect(ownerMutateAdmin.status).toBe(200);
+    const ownerMutateAdminJson = await ownerMutateAdmin.json() as any;
+    expect(ownerMutateAdminJson.previousRole).toBe("admin");
+    expect(ownerMutateAdminJson.role).toBe("staff");
+    expect(ownerMutateAdminJson.auditLogId).toEqual(expect.any(String));
+
+    const ownerMutateOwner = await authFetch(`/organizers/${scenario.organizer.id}/memberships/${ownerMembership.membershipId}/role`, ownerToken, {
+      method: "POST",
+      body: JSON.stringify({ role: "admin" })
+    });
+    expect(ownerMutateOwner.status).toBe(409);
+  });
+
   it("enforces late payment capabilities: staff can view but cannot resolve; admin and owner can resolve", async () => {
     const scenario = await seedScenario();
     const ownerToken = await login(scenario.owner.email, scenario.owner.password);
     const adminToken = await login(scenario.admin.email, scenario.admin.password);
     const staffToken = await login(scenario.staff.email, scenario.staff.password);
+    const scannerToken = await login(scenario.scanner.email, scenario.scanner.password);
 
     const staffLateCases = await authFetch(`/late-payment-cases?organizerId=${scenario.organizer.id}`, staffToken);
     expect(staffLateCases.status).toBe(200);
+    const staffLateCasesJson = await staffLateCases.json() as any[];
+    expect(Array.isArray(staffLateCasesJson)).toBe(true);
+    expect(staffLateCasesJson[0]).toEqual(expect.objectContaining({
+      id: scenario.lateCase.id,
+      organizerId: scenario.organizer.id,
+      eventId: scenario.event.id,
+      orderId: scenario.ownerOrder.id,
+      provider: scenario.lateCase.provider,
+      paymentAttemptId: scenario.lateCase.providerPaymentId,
+      status: "PENDING"
+    }));
+    expect(staffLateCasesJson[0].detectedAt).toEqual(expect.any(String));
+    expect(staffLateCasesJson[0].resolvedAt).toBeNull();
+    expect(staffLateCasesJson[0].version).toEqual(expect.any(Number));
+    expect(staffLateCasesJson[0].order).toBeUndefined();
+
+    const scannerLateCases = await authFetch(`/late-payment-cases?organizerId=${scenario.organizer.id}`, scannerToken);
+    expect(scannerLateCases.status).toBe(403);
 
     const staffResolveLateCase = await authFetch(`/late-payment-cases/${scenario.lateCase.id}/resolve`, staffToken, {
       method: "POST",
@@ -421,6 +496,29 @@ describe.skipIf(!hasIntegrationEnv)("admin authz phase 1 integration", () => {
       body: JSON.stringify({ action: "ACCEPT", resolutionNotes: "owner ok" })
     });
     expect(ownerResolveLateCase.status).toBe(200);
+  });
+
+  it("enforces late payment resolve transitions and returns conflicts on invalid transitions", async () => {
+    const scenario = await seedScenario();
+    const adminToken = await login(scenario.admin.email, scenario.admin.password);
+
+    const markRefundRequested = await authFetch(`/late-payment-cases/${scenario.lateCase.id}/resolve`, adminToken, {
+      method: "POST",
+      body: JSON.stringify({ action: "REFUND_REQUESTED", resolutionNotes: "follow-up refund" })
+    });
+    expect(markRefundRequested.status).toBe(200);
+
+    const invalidTransition = await authFetch(`/late-payment-cases/${scenario.lateCase.id}/resolve`, adminToken, {
+      method: "POST",
+      body: JSON.stringify({ action: "REJECT", resolutionNotes: "should conflict" })
+    });
+    expect(invalidTransition.status).toBe(409);
+
+    const finalRefunded = await authFetch(`/late-payment-cases/${scenario.lateCase.id}/resolve`, adminToken, {
+      method: "POST",
+      body: JSON.stringify({ action: "REFUNDED", resolutionNotes: "refund completed" })
+    });
+    expect(finalRefunded.status).toBe(200);
   });
 
   it("enforces resend confirmation: scanner denied, staff allowed", async () => {
