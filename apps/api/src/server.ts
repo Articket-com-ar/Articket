@@ -13,6 +13,9 @@ import {
   organizerMembersListSchema,
   organizerMemberRoleUpdateInputSchema,
   organizerMemberRoleUpdateResultSchema,
+  organizerMemberCreateInputSchema,
+  organizerMemberCreateResultSchema,
+  organizerMemberRemoveResultSchema,
   type OrganizerMemberListItem
 } from "@articket/shared";
 import { prisma } from "./lib/prisma.js";
@@ -339,6 +342,75 @@ app.get("/organizers/:id/memberships", { preHandler: verifyAuth }, async (req: a
   return organizerMembersListSchema.parse(dto);
 });
 
+app.post("/organizers/:id/memberships", { preHandler: verifyAuth }, async (req: any) => {
+  const user = req.user as JwtPayload;
+  const params = z.object({ id: z.string().uuid() }).parse(req.params);
+  const body = organizerMemberCreateInputSchema.parse(req.body ?? {});
+
+  const actorMembership = await prisma.membership.findUnique({
+    where: { userId_organizerId: { userId: user.userId, organizerId: params.id } },
+    select: { role: true }
+  });
+
+  if (!actorMembership || actorMembership.role !== "owner") {
+    throw app.httpErrors.forbidden("Solo owner puede crear miembros de la organización");
+  }
+
+  const targetUser = await prisma.user.findUnique({
+    where: { email: body.email },
+    select: { id: true, email: true }
+  });
+
+  if (!targetUser) {
+    throw app.httpErrors.notFound("Usuario no encontrado");
+  }
+
+  const existingMembership = await prisma.membership.findUnique({
+    where: { userId_organizerId: { userId: targetUser.id, organizerId: params.id } },
+    select: { id: true }
+  });
+
+  if (existingMembership) {
+    throw app.httpErrors.conflict("El usuario ya pertenece a la organización");
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    const membership = await tx.membership.create({
+      data: {
+        userId: targetUser.id,
+        organizerId: params.id,
+        role: body.role
+      }
+    });
+
+    const audit = await tx.auditLog.create({
+      data: {
+        organizerId: params.id,
+        actorUserId: user.userId,
+        action: "membership.created",
+        entityType: "membership",
+        entityId: membership.id,
+        metadata: {
+          targetUserId: targetUser.id,
+          email: targetUser.email,
+          role: membership.role
+        }
+      }
+    });
+
+    return {
+      membershipId: membership.id,
+      organizerId: membership.organizerId,
+      userId: membership.userId,
+      email: targetUser.email,
+      role: membership.role,
+      auditLogId: audit.id
+    };
+  });
+
+  return organizerMemberCreateResultSchema.parse(result);
+});
+
 app.post("/organizers/:id/memberships/:membershipId/role", { preHandler: verifyAuth }, async (req: any) => {
   const user = req.user as JwtPayload;
   const params = z.object({ id: z.string().uuid(), membershipId: z.string().uuid() }).parse(req.params);
@@ -407,6 +479,69 @@ app.post("/organizers/:id/memberships/:membershipId/role", { preHandler: verifyA
   });
 
   return organizerMemberRoleUpdateResultSchema.parse(result);
+});
+
+app.delete("/organizers/:id/memberships/:membershipId", { preHandler: verifyAuth }, async (req: any) => {
+  const user = req.user as JwtPayload;
+  const params = z.object({ id: z.string().uuid(), membershipId: z.string().uuid() }).parse(req.params);
+
+  const actorMembership = await prisma.membership.findUnique({
+    where: { userId_organizerId: { userId: user.userId, organizerId: params.id } },
+    select: { userId: true, role: true }
+  });
+
+  if (!actorMembership || actorMembership.role !== "owner") {
+    throw app.httpErrors.forbidden("Solo owner puede remover miembros de la organización");
+  }
+
+  const targetMembership = await prisma.membership.findUnique({
+    where: { id: params.membershipId },
+    include: { user: { select: { email: true } } }
+  });
+
+  if (!targetMembership || targetMembership.organizerId !== params.id) {
+    throw app.httpErrors.notFound("Membership no encontrado");
+  }
+
+  if (targetMembership.userId === user.userId) {
+    throw app.httpErrors.conflict("Owner no puede auto-removerse en esta fase");
+  }
+
+  if (targetMembership.role === "owner") {
+    const ownerCount = await prisma.membership.count({ where: { organizerId: params.id, role: "owner" } });
+    if (ownerCount <= 1) {
+      throw app.httpErrors.conflict("No se puede remover el último owner");
+    }
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    await tx.membership.delete({ where: { id: targetMembership.id } });
+
+    const audit = await tx.auditLog.create({
+      data: {
+        organizerId: params.id,
+        actorUserId: user.userId,
+        action: "membership.removed",
+        entityType: "membership",
+        entityId: targetMembership.id,
+        metadata: {
+          targetUserId: targetMembership.userId,
+          email: targetMembership.user.email,
+          role: targetMembership.role
+        }
+      }
+    });
+
+    return {
+      membershipId: targetMembership.id,
+      organizerId: targetMembership.organizerId,
+      userId: targetMembership.userId,
+      role: targetMembership.role,
+      auditLogId: audit.id
+    };
+  });
+
+  return organizerMemberRemoveResultSchema.parse(result);
 });
 
 app.post("/events/:id/ticket-types", { preHandler: verifyAuth }, async (req: any) => {
