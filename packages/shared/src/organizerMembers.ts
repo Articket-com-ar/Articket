@@ -36,3 +36,28 @@ export const organizerMemberRoleUpdateResultSchema = z.object({
   auditLogId: z.string().uuid()
 });
 export type OrganizerMemberRoleUpdateResult = z.infer<typeof organizerMemberRoleUpdateResultSchema>;
+
+export const organizerMemberCreateInputSchema = z.object({
+  email: z.string().email(),
+  role: mutableOrganizerMemberRoleSchema
+});
+export type OrganizerMemberCreateInput = z.infer<typeof organizerMemberCreateInputSchema>;
+
+export const organizerMemberCreateResultSchema = z.object({
+  membershipId: z.string().uuid(),
+  organizerId: z.string().uuid(),
+  userId: z.string().uuid(),
+  email: z.string().email(),
+  role: organizerMemberRoleSchema,
+  auditLogId: z.string().uuid()
+});
+export type OrganizerMemberCreateResult = z.infer<typeof organizerMemberCreateResultSchema>;
+
+export const organizerMemberDeactivateResultSchema = z.object({
+  membershipId: z.string().uuid(),
+  organizerId: z.string().uuid(),
+  userId: z.string().uuid(),
+  role: organizerMemberRoleSchema,
+  auditLogId: z.string().uuid()
+});
+export type OrganizerMemberDeactivateResult = z.infer<typeof organizerMemberDeactivateResultSchema>;
